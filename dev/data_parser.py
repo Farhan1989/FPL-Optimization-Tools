@@ -19,7 +19,7 @@ def read_data(options, source=None):
 
     if not source:
         try:
-            latest_file = max(list_of_files, key=os.path.getctime)
+            latest_file = max((DATA_DIR / x for x in list_of_files), key=os.path.getctime)
             print(f"No source specified, using most recent projection file: {latest_file}")
             return pd.read_csv(latest_file)
         except Exception:

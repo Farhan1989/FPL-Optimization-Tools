@@ -1,7 +1,7 @@
 # FPL Optimization Tools
 
 This repository provides a set of tools for solving deterministic **Fantasy Premier League (FPL)** optimization problems.
-The Python code uses **`pandas`** for data management, **`sasoptpy`** for building the optimization model, and **HiGHS** via **`highspy`** to solve the model.
+The Python code uses **`pandas`** for data management, and **HiGHS** via **`highspy`** to build and solve the optimization model.
 
 It allows users to:
 

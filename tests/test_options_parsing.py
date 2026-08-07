@@ -6,7 +6,7 @@ from pathlib import Path
 
 import pytest
 
-from run.solve_regular import load_config_files
+from run.solve import load_config_files
 
 
 @pytest.fixture
