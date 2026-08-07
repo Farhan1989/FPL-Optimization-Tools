@@ -29,10 +29,12 @@ solver, and commits everything to the archive. Note the printed `<ARCHIVE>` path
     uv run python validate_sources.py --sources solio review \
         --mixed mixed.csv --bootstrap <ARCHIVE>/bootstrap_slim.json
 
-**A4. Generate scenarios:**
+**A4. Generate scenarios (with published-data enrichment):**
 
+    uv run python solio_enrich.py --out data/enrich.json
     uv run python scenario_generator.py --sources review solio \
-        --data-dir data --scenarios 200 --out scenarios/ --horizon 12
+        --data-dir data --scenarios 200 --out scenarios/ --horizon 12 \
+        --enrich data/enrich.json
 
 Check the printed calibration line: bias should be within ±0.05.
 
@@ -77,10 +79,18 @@ morning if there is major team news.
 If validation fails, read `validation.log` — fix the data, don't `--force`
 past it unless you understand exactly why it fired.
 
-**B3. Scenarios:**
+**B3. Enrichment + scenarios:**
 
+    uv run python solio_enrich.py --out data/enrich.json
     uv run python scenario_generator.py --sources review solio \
-        --data-dir data --scenarios 200 --out scenarios/ --horizon 12
+        --data-dir data --scenarios 200 --out scenarios/ --horizon 12 \
+        --enrich data/enrich.json
+
+The enrich step pulls Solio's published team clean-sheet odds and per-player
+DefCon trigger probabilities (free public endpoint, 4-hourly) and replaces
+the generator's inferred values for the first gameweek, means conserved. If
+the fetch or parse fails it refuses to write and the generator runs
+unenriched — never blocked, just less refined.
 
 **B4. Stochastic transfer decision.** Current squad IDs, banked FTs, bank:
 
@@ -108,17 +118,44 @@ how assumption-sensitive this week is, not an error.
 
 ---
 
-## C. Special weeks
+## C. Special weeks and chips
 
-- **Chip weeks (WC / FH / BB / TC) and blank/double planning:** use the
-  stock solver (B2) as the authority — the stochastic and CVaR tools do not
-  model chips. Scenario tools remain useful for scoring the resulting squad.
-- **Wildcard:** treat as preseason — run the full A sequence with
-  `--preseason` replaced by `--squad`-free CVaR/stochastic solves.
-- **Mid-season budget caveat:** `stochastic_solver.py` uses buy prices only.
-  When your squad carries large sell-price discounts, sanity-check the
-  recommended move's affordability in the stock solver or the FPL site
-  before committing.
+**Two chip sets, two different problems.** The first set (WC/FH/BB/TC)
+expires at the GW19 deadline (13:30 GMT, Sat 2 Jan) and plays out on a flat
+calendar — no blanks or doubles — so it is a *player-distribution* problem
+with a hard expiry. The second set is a *calendar* problem: blanks and
+doubles from ~GW19 onward dictate usage, and those firm up with cup draws.
+
+**First-set workflow** (`chip_planner.py`):
+
+    # 1. enumerate timings incl. community-consensus candidates
+    uv run python chip_planner.py enumerate --bb 1 2 3 --fh 3 4 8 --wc 4 7 \
+        --candidates "bb:1,fh:3,wc:7" "bb:2,wc:4,fh:8"
+
+    # 2. score all plans under scenarios: win-share / regret / CVaR
+    uv run python chip_planner.py score --plans plans/ \
+        --scenario-dir scenarios/ --bootstrap <ARCHIVE>/bootstrap_slim.json
+
+    # 3. Triple Captain weeks by TAIL mass, not mean
+    uv run python chip_planner.py tc-table --scenario-dir scenarios/
+
+Timing: run before finalising the GW1 squad (BB-GW1 candidates cannot wait),
+then re-run fortnightly — the horizon reaches the full first-set window
+around GW5–7. Heed the verdict line: when the top plans sit inside the noise
+band, the table is telling you it's a coin flip — decide on team news and
+fixture certainty, and treat the certainty of an early chip (you fully
+control the GW1 squad) as a legitimate tiebreaker. From ~GW15, the deadline
+guard matters: commit remaining chips to their best surviving week rather
+than letting them expire.
+
+**Second-set chips (~GW25+):** wait for cup draws, then enumerate over the
+2–4 plausible blank/double calendars by hand and run `score` under each.
+
+- **Wildcard weeks:** treat as preseason — run the full A sequence with the
+  CVaR/stochastic solves in squad-from-scratch mode.
+- **Mid-season budget caveat:** `stochastic_solver.py` and chip plans use
+  buy prices only. When your squad carries large sell-price discounts,
+  sanity-check affordability in the stock solver or on the FPL site.
 
 ## D. Periodic (not weekly)
 
@@ -141,3 +178,5 @@ how assumption-sensitive this week is, not an error.
 | `scenario_generator.py` | What might actually happen, with realistic variance and correlation |
 | `cvar_solver.py` | How risky is this squad vs the field; what would a tail-safe squad be |
 | `stochastic_solver.py` | Which move NOW is best given I'll adapt later; was uncertainty worth modelling (VSS) |
+| `chip_planner.py` | When to play each first-set chip — and whether the answer is real or a coin flip |
+| `solio_enrich.py` | Published CS odds + DefCon probabilities to sharpen scenario decomposition |

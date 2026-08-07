@@ -52,8 +52,10 @@ data/review.csv  data/solio.csv          ← manual download, weekly
         │
         └─ scenario_generator.py         ← S sampled outcome paths
                    │
+                   │      ▲ solio_enrich.py  ← published CS/DefCon probs
                    ├─ cvar_solver.py         ← squad vs field, tail-aware
-                   └─ stochastic_solver.py   ← two-stage transfer decision
+                   ├─ stochastic_solver.py   ← two-stage transfer decision
+                   └─ chip_planner.py        ← chip timing: enumerate → score
 ```
 
 Operational sequences live in `runbook.md`. Do not duplicate them here.
@@ -165,7 +167,42 @@ the blend normalises by available weight (`weight` column drops to 0.5 but
 mixed/solio ratio is 0.997). Single-source *players* are likewise not
 halved. This was a live concern and is now closed.
 
-### 3.7 Deterministic backtesting — ABANDONED, deliberately
+### 3.7 Chips: two sets, two different problems — SOLVE-THEN-EVALUATE
+
+26/27 has two chip sets. The first (WC/FH/BB/TC) **expires at the GW19
+deadline** and plays out on a flat calendar — essentially no blanks/doubles
+before GW19. The second set's value is dictated by spring blanks/doubles,
+unknown until cup draws resolve.
+
+Consequences:
+
+- **First set is a player-distribution problem with a hard expiry**, not a
+  calendar problem. On a flat calendar, chip weeks are separated only by the
+  points *distribution* (TC is an option on the captain's right tail;
+  ranking TC weeks by mean is close to meaningless). Use-it-or-lose-it makes
+  it finite-horizon optimal stopping: the play/hold threshold falls as GW19
+  approaches. The classic failure is dumping unused chips into GW17–18.
+- **BB-GW1 has a structural argument**: bench engineering costs zero when
+  the squad is built from scratch. Community consensus (BB1/FH3/WC7 or
+  BB2/WC4/FH8) is treated as *candidates to score*, not answers to adopt —
+  `chip_planner.py enumerate --candidates` puts them on identical footing
+  with solver-found timings.
+- **A stochastic chip MILP was rejected**: chip binaries inside a
+  scenario-replicated model explode (FH's shadow squad doubles it again),
+  and two-stage recourse would play TC on weeks it already "knows" the haul
+  lands — look-ahead bias in its worst form. The tractable design is
+  **enumerate deterministically (stock solver, `gap: 0`), then evaluate
+  every plan under the 200 scenarios**, reporting win-share and regret
+  rather than a ranked xPts column. When the top plans sit inside the noise
+  band, the honest answer is "coin flip — decide on team news", and the
+  tool says so explicitly.
+- FH's first-half value is substantially *insurance* (injury crisis,
+  fixture chaos), which no expectation-maximising solve prices. Policy:
+  hold as insurance to ~GW15–16, then commit to the best surviving week.
+- **Second set:** wait for cup draws (~GW25+), enumerate the 2–4 plausible
+  blank/double calendars by hand, score under each.
+
+### 3.8 Deterministic backtesting — ABANDONED, deliberately
 
 No historical projection CSVs exist. Realised outcomes are recoverable from
 the FPL API (and `vaastav/Fantasy-Premier-League`); **ex-ante projections are
@@ -199,7 +236,12 @@ If one must change, record it in `--note` **and** add a line to §7 below.
 
 **`scenario_generator.py`** — component priors (`SHARE`, `ASSIST_FRACTION`,
 tilt scale) are documented constants from FPL scoring composition, *not*
-calibrated to 26/27. Calibration verified only that sampled means reproduce
+calibrated to 26/27. `--enrich` (from `solio_enrich.py`) replaces the two
+weakest inferred quantities — team CS probability and per-player DefCon —
+with Solio's published values, but only for the FIRST horizon gameweek and
+only for listed players/teams; later weeks remain prior-based. The parser
+depends on the public page's markdown layout and refuses to write on a thin
+parse rather than emitting garbage. Calibration verified only that sampled means reproduce
 the blended projection (bias −0.02); the *shape* of the tails is unverified
 until realised outcomes exist.
 
@@ -218,8 +260,15 @@ flexibility — hence `--max-recourse-transfers` (default 1) as a temper.
 but small S still carries Monte Carlo noise in captain choice. Use ≥200
 generated scenarios; treat marginal captain flips as noise.
 
-**Chips are out of scope everywhere.** Chip weeks, blanks and doubles are
-the stock solver's job.
+**`chip_planner.py`** — `enumerate` wraps the stock solver's parallel
+pattern but has **never run against the live FPL API** (built in a sandbox
+without API access; parser and scoring validated on real solver logs and
+scenarios). Scoring ignores autosubs (flat lineup totals) and uses buy
+prices. Second-set calendar machinery is a manual process, not code.
+
+**Chips remain out of scope in `cvar_solver.py` and
+`stochastic_solver.py`.** Chip modelling lives in `chip_planner.py` +
+stock solver only.
 
 ---
 
@@ -239,6 +288,10 @@ the stock solver's job.
    attackers. All projection models are miscalibrated on the bonus component
    until enough 26/27 data accumulates — expect the noisiest signal to be
    bonus for roughly the first 6–8 gameweeks.
+5. **Commit and log the first-set chip plan.** Run `chip_planner.py`
+   enumerate + score before GW1 (BB-GW1 candidates can't wait); record the
+   chosen plan in §7 — it constrains every subsequent week. Verify
+   `enumerate` on its first live run (§5). Deadline guard from ~GW15.
 
 ---
 
@@ -247,5 +300,7 @@ the stock solver's job.
 | Date | Change | Rationale |
 |---|---|---|
 | 2026-08 | Pipeline built (steps 1–4), `decay_solio.py` retired, `gap: 0` set | Initial build |
+| 2026-08 | `chip_planner.py` added; chip strategy recorded (§3.7) | Two-set chip structure, first set expires GW19 |
+| 2026-08 | `solio_enrich.py` added; generator gains `--enrich` | Published CS/DefCon beats inferred priors; means conserved |
 
 *(Append here whenever an invariant in §4 changes.)*

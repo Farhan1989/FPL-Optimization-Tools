@@ -240,6 +240,54 @@ def decompose(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
+def apply_enrichment(dec: pd.DataFrame, enrich_path: Path) -> pd.DataFrame:
+    """
+    Override the first horizon gameweek's inferred team clean-sheet
+    probability and per-player DefCon probability with Solio's PUBLISHED
+    values (solio_enrich.py), conserving each player's total EV: any change
+    in cs/defcon expectation flows into the assist rate (mean-linear), so
+    the blend's calibrated means are untouched — only the decomposition,
+    and therefore the correlation/tail structure, improves.
+    """
+    e = json.loads(Path(enrich_path).read_text())
+    gws = dec.attrs["gameweeks"]
+    g = gws[0]
+    if e.get("gameweek") not in (None, g):
+        print(f"[scen] enrich is for GW{e['gameweek']}, horizon starts GW{g} — skipping enrichment")
+        return dec
+    pos = dec["Pos"].to_numpy()
+    cs_pts = np.vectorize(CS_PTS.get)(pos).astype(float)
+    p60 = dec[f"{g}_p_60"].to_numpy(float)
+    p_play = np.maximum(dec[f"{g}_p_play"].to_numpy(float), 1e-6)
+
+    # --- team clean sheets ---
+    cs_map = {t: v["cs"] for t, v in e["teams"].items() if "cs" in v}
+    new_cs = dec["Team"].map(cs_map)
+    have = new_cs.notna().to_numpy()
+    old_cs = dec[f"{g}_team_cs"].to_numpy(float)
+    merged = np.where(have, new_cs.fillna(0).to_numpy(float), old_cs)
+    delta_ev = (old_cs - merged) * p60 * cs_pts  # freed (+) or owed (-)
+    dec[f"{g}_team_cs"] = merged
+
+    # --- per-player DefCon ---
+    key = dec["Name"].astype(str) + "|" + dec["Team"].astype(str)
+    dc_map = key.map(e.get("defcon", {}))
+    dc_have = dc_map.notna().to_numpy()
+    old_dc = dec[f"{g}_p_defcon"].to_numpy(float)
+    new_dc = np.where(dc_have, dc_map.fillna(0).to_numpy(float), old_dc)
+    delta_ev += (old_dc - new_dc) * p60 * DEFCON_PTS
+    dec[f"{g}_p_defcon"] = new_dc
+
+    # conserve: shift the net EV delta into assists (sampled direct Poisson)
+    dec[f"{g}_lam_assist"] = np.maximum(dec[f"{g}_lam_assist"].to_numpy(float) + delta_ev / (ASSIST_PTS * p_play), 0.0)
+    print(
+        f"[scen] enrichment applied to GW{g}: {int(have.sum())} players' "
+        f"team CS overridden ({len(cs_map)} teams), "
+        f"{int(dc_have.sum())} DefCon probabilities set from published data"
+    )
+    return dec
+
+
 # ------------------------------------------------------------------ sampling
 
 
@@ -361,12 +409,16 @@ def main() -> int:
     ap.add_argument("--scenarios", type=int, default=200)
     ap.add_argument("--horizon", type=int, default=None)
     ap.add_argument("--seed", type=int, default=42)
+    ap.add_argument("--enrich", type=Path, default=None, help="enrich.json from solio_enrich.py")
     ap.add_argument("--calibrate-only", action="store_true")
     args = ap.parse_args()
 
     blend = load_blend(args.data_dir, args.sources, args.horizon)
     dec = decompose(blend)
     dec.attrs["gameweeks"] = blend.attrs["gameweeks"]
+    if args.enrich:
+        dec = apply_enrichment(dec, args.enrich)
+        dec.attrs["gameweeks"] = blend.attrs["gameweeks"]
 
     print(f"[scen] {len(dec)} players, GWs {dec.attrs['gameweeks'][0]}-{dec.attrs['gameweeks'][-1]}, sources {args.sources}")
 
