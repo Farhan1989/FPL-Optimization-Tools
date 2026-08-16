@@ -77,17 +77,50 @@ def parse_candidate(text: str) -> dict:
     return out
 
 
-def cmd_enumerate(args) -> int:
+def _solve_one(task: tuple[dict, str]) -> tuple[str, dict]:
+    """Module-level worker: ProcessPoolExecutor pickles this BY NAME, and on
+    spawn-start platforms (macOS) children re-import this module fresh, so
+    ALL path setup must happen here, not in the parent process."""
     import os
     import sys
-    from concurrent.futures import ProcessPoolExecutor
     from contextlib import redirect_stdout
 
-    run_dir = Path(__file__).resolve().parent / "run"
-    sys.path.insert(0, str(run_dir))
-    sys.path.insert(0, str(Path(__file__).resolve().parent))
-    os.chdir(run_dir)
-    from solve import solve_regular
+    combo, plans_dir = task
+    name = combo_name(combo)
+    log = Path(plans_dir) / f"{name}.log"
+    opts = {
+        "verbose": False,
+        "print_result_table": False,
+        "print_decay_metrics": False,
+        "print_transfer_chip_summary": False,
+        "print_squads": True,
+        # one plan per combo: iteration variants are for exploring ONE
+        # problem's near-ties, not for ranking ACROSS problems, and they
+        # multiply solve time by their count
+        "num_iterations": 1,
+        **{f"use_{c}": ([w] if w else []) for c, w in combo.items()},
+    }
+    with log.open("w") as fh, redirect_stdout(fh):
+        if os.environ.get("CHIP_TEST"):  # pool-mechanics test hook
+            print(f"    ** GW 1:\n    Lineup: \n    \t{name} (1.0, C)\n    Bench: \n    Lineup xPts: 1")
+        else:
+            root = Path(__file__).resolve().parent
+            run_dir = root / "run"
+            sys.path.insert(0, str(run_dir))
+            sys.path.insert(0, str(root))
+            os.chdir(run_dir)
+            # solve.py parses sys.argv AT IMPORT TIME; spawned children
+            # inherit chip_planner's argv, which its parser rejects. Hand it
+            # an empty argv before the import.
+            sys.argv = [sys.argv[0]]
+            from solve import solve_regular
+
+            solve_regular(opts)
+    return name, combo
+
+
+def cmd_enumerate(args) -> int:
+    from concurrent.futures import ProcessPoolExecutor
 
     grids = {"bb": [None, *args.bb], "fh": [None, *args.fh], "wc": [None, *args.wc], "tc": [None, *args.tc]}
     combos = []
@@ -101,31 +134,32 @@ def cmd_enumerate(args) -> int:
         if c not in combos:
             combos.append(c)
 
-    plans_dir = Path(args.plans)
+    plans_dir = Path(args.plans).resolve()
     plans_dir.mkdir(parents=True, exist_ok=True)
     manifest = {}
     print(f"[chip] {len(combos)} combinations to solve")
 
-    def one(combo):
-        name = combo_name(combo)
-        opts = {
-            "verbose": False,
-            "print_result_table": False,
-            "print_decay_metrics": False,
-            "print_transfer_chip_summary": False,
-            "print_squads": True,
-            **{f"use_{c}": ([w] if w else []) for c, w in combo.items()},
-        }
-        log = plans_dir / f"{name}.log"
-        with log.open("w") as fh, redirect_stdout(fh):
-            solve_regular(opts)
-        return name, combo
+    import os
+    import time
+    from concurrent.futures import as_completed
 
+    tasks = [(c, str(plans_dir)) for c in combos]
     workers = args.workers or max(1, (os.cpu_count() or 2) - 2)
+    print(
+        f"[chip] {workers} workers; each combo is one full solve "
+        f"(minutes, not seconds). All solver output goes to "
+        f"{plans_dir}/<combo>.log — watch progress with: tail -f, "
+        f"or file sizes with: ls -la"
+    )
+    t0 = time.time()
     with ProcessPoolExecutor(max_workers=workers) as ex:
-        for name, combo in ex.map(one, combos):
+        futs = {ex.submit(_solve_one, t): t for t in tasks}
+        done = 0
+        for fut in as_completed(futs):
+            name, combo = fut.result()
             manifest[name] = {c: w for c, w in combo.items() if w}
-            print(f"  done {name}")
+            done += 1
+            print(f"  [{done}/{len(tasks)}] {name} ({(time.time() - t0) / 60:.1f} min elapsed)", flush=True)
     (plans_dir / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(f"[chip] plans + manifest written to {plans_dir}/")
     return 0

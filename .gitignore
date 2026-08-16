@@ -16,3 +16,4 @@ solver/*
 *.png
 _test*.*
 .cache/
+.DS_Store

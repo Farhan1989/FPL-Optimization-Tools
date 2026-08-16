@@ -1,0 +1,142 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Solver Console</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link href="https://fonts.googleapis.com/css2?family=Archivo:wght@500;700;800&family=IBM+Plex+Mono:wght@400;500;600&family=IBM+Plex+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/static/styles.css">
+</head>
+<body>
+
+<header class="topbar">
+  <div class="brand">
+    <span class="brand-mark" aria-hidden="true"></span>
+    <div>
+      <h1>Solver console</h1>
+      <p class="paths" id="paths">reading paths&hellip;</p>
+    </div>
+  </div>
+  <div class="topbar-actions">
+    <span class="pill" id="tied-flag" hidden></span>
+    <button class="btn btn-primary" id="run-all">Run all steps</button>
+  </div>
+</header>
+
+<div class="shell">
+
+  <nav class="rail" id="rail">
+    <button class="rail-item is-active" data-panel="sources"><b>01</b> Sources</button>
+    <button class="rail-item" data-panel="settings"><b>02</b> Settings</button>
+    <button class="rail-item" data-panel="run"><b>03</b> Run</button>
+    <button class="rail-item" data-panel="plans"><b>04</b> Plans</button>
+    <button class="rail-item" data-panel="compare"><b>05</b> Compare</button>
+  </nav>
+
+  <main>
+
+    <!-- 01 ------------------------------------------------------------ -->
+    <section class="panel is-active" id="panel-sources">
+      <div class="panel-head">
+        <h2>Sources</h2>
+        <p>Projection exports land in the data folder. Filenames carry through to
+           the solver, so keep them stable week to week.</p>
+      </div>
+
+      <label class="dropzone" id="dropzone">
+        <input type="file" id="file-input" multiple accept=".csv,.json" hidden>
+        <span class="dropzone-arrow" aria-hidden="true"></span>
+        <b>Drop CSVs here</b>
+        <small>or choose files &middot; .csv and .json, up to 64 MB each</small>
+      </label>
+
+      <div id="upload-report" class="notice" hidden></div>
+
+      <table class="table" id="file-table">
+        <thead>
+          <tr><th>File</th><th>Source</th><th class="num">Rows</th>
+              <th class="num">Size</th><th>Updated</th><th></th></tr>
+        </thead>
+        <tbody></tbody>
+      </table>
+      <p class="empty" id="files-empty">No files yet. Drop your FPL Review and
+         Solio exports above to get started.</p>
+    </section>
+
+    <!-- 02 ------------------------------------------------------------ -->
+    <section class="panel" id="panel-settings">
+      <div class="panel-head">
+        <h2>Settings</h2>
+        <p>Edits write to <code id="settings-path">user_settings.json</code>.
+           The previous file is kept alongside it as a timestamped backup.</p>
+      </div>
+
+      <div class="toolbar">
+        <div class="segmented" role="tablist">
+          <button class="seg is-active" data-mode="form">Fields</button>
+          <button class="seg" data-mode="raw">Raw JSON</button>
+        </div>
+        <div class="toolbar-right">
+          <span class="saved-note" id="saved-note" hidden></span>
+          <button class="btn" id="settings-reload">Discard changes</button>
+          <button class="btn btn-primary" id="settings-save">Save settings</button>
+        </div>
+      </div>
+
+      <div id="settings-warnings" class="notice notice-warn" hidden></div>
+      <div id="settings-form" class="settings-grid"></div>
+      <textarea id="settings-raw" class="raw-json" spellcheck="false" hidden></textarea>
+    </section>
+
+    <!-- 03 ------------------------------------------------------------ -->
+    <section class="panel" id="panel-run">
+      <div class="panel-head">
+        <h2>Run</h2>
+        <p>Steps are ordered as the runbook orders them. Run all stops at the
+           first non-zero exit so a failed gate can&rsquo;t leak into a solve.
+           <code>{ARCHIVE}</code> fills in from the newest snapshot at launch.</p>
+      <div id="archive-note" class="notice notice-warn" hidden></div>
+      </div>
+      <div class="steps" id="steps"></div>
+    </section>
+
+    <!-- 04 ------------------------------------------------------------ -->
+    <section class="panel" id="panel-plans">
+      <div class="panel-head">
+        <h2>Plans</h2>
+        <p>One column per gameweek. Transfers read top to bottom: who leaves,
+           who arrives.</p>
+      </div>
+      <div class="toolbar">
+        <div class="segmented" id="plan-switch" role="tablist"></div>
+        <div class="toolbar-right">
+          <label class="check"><input type="checkbox" id="show-squad" checked>
+            <span>Show the eleven</span></label>
+          <button class="btn" id="plans-refresh">Reload plans</button>
+        </div>
+      </div>
+      <div id="ladder" class="ladder-wrap"></div>
+      <p class="empty" id="plans-empty">No plans found yet. Run a solve, or drop a
+         <code>*.plan.json</code> into the results folder.</p>
+    </section>
+
+    <!-- 05 ------------------------------------------------------------ -->
+    <section class="panel" id="panel-compare">
+      <div class="panel-head">
+        <h2>Compare</h2>
+        <p>Expected points by gameweek. The band marks plans close enough to the
+           leader that the ordering is projection noise, not signal.</p>
+      </div>
+      <div id="compare-wrap"></div>
+      <p class="empty" id="compare-empty">Nothing to compare until at least one
+         solve has written results.</p>
+    </section>
+
+  </main>
+</div>
+
+<script src="/static/app.js"></script>
+</body>
+</html>

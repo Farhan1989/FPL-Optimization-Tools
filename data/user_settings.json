@@ -1,32 +1,38 @@
 {
-    "datasource": "mixed",
-    "data_weights": {
-        "solio": 0.5,
-        "review": 0.5
-    },
-    "team_data": "id",
-    "team_id": 631,
-    "preseason": true,
-    "horizon": 12,
-    "no_transfer_last_gws": 2,
-    "secs": 900,
-    "gap": 0,
-    "num_iterations": 1,
-    "decay_base": 0.87,
-    "ft_value_list":{
-        "2": 2.5,
-        "3": 2.1,
-        "4": 1.4,
-        "5": 1.0
-    },
-    "xmin_lb": 300,
-    "ev_per_price_cutoff": 30,
-    "keep_top_ev_percent": 5,
-    "banned": [],
-    "locked": [],
-    "use_wc": [],
-    "use_bb": [],
-    "use_fh": [],
-    "use_tc": [],
-    "verbose": true
+  "datasource": "mixed",
+  "data_weights": {
+    "solio": 0.5,
+    "review": 0.5
+  },
+  "team_data": "id",
+  "team_id": 631,
+  "preseason": true,
+  "horizon": 14,
+  "no_transfer_last_gws": 2,
+  "secs": 900,
+  "gap": 0,
+  "num_iterations": 1,
+  "decay_base": 0.87,
+  "ft_value_list": {
+    "2": 2.5,
+    "3": 2.1,
+    "4": 1.4,
+    "5": 1
+  },
+  "xmin_lb": 300,
+  "ev_per_price_cutoff": 30,
+  "keep_top_ev_percent": 5,
+  "banned": [],
+  "locked": [],
+  "use_wc": [
+    3
+  ],
+  "use_bb": [
+    1
+  ],
+  "use_fh": [
+    8
+  ],
+  "use_tc": [],
+  "verbose": true
 }

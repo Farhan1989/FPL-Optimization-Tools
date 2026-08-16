@@ -302,5 +302,6 @@ stock solver only.
 | 2026-08 | Pipeline built (steps 1–4), `decay_solio.py` retired, `gap: 0` set | Initial build |
 | 2026-08 | `chip_planner.py` added; chip strategy recorded (§3.7) | Two-set chip structure, first set expires GW19 |
 | 2026-08 | `solio_enrich.py` added; generator gains `--enrich` | Published CS/DefCon beats inferred priors; means conserved |
+| 2026-08 | bb1_fh8_wc3 chosen GW1 | 48.5% vs 44.0% win-share is inside noise band, decided on FH insurance value; Solio tree independently showed 0.4pt spread. |
 
 *(Append here whenever an invariant in §4 changes.)*

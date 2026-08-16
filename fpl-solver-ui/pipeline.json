@@ -1,0 +1,221 @@
+{
+  "_comment": [
+    "Weekly gameweek sequence, following runbook.md section B.",
+    "Commands run from {ROOT} with argv split by shlex \u2014 no shell, so no pipes.",
+    "Placeholders: {ROOT} {DATA} {RESULTS} {SETTINGS} {ARCHIVE}, plus any name",
+    "declared in that step's 'params'. {ARCHIVE} resolves at launch to the",
+    "newest snapshot containing bootstrap_slim.json.",
+    "A blank optional param removes its own token and the flag before it.",
+    "'clean' lists directories cleared before the step runs \u2014 stale files from",
+    "a larger previous run would otherwise be picked up by the next glob.",
+    "'enabled: false' keeps a step visible but skips it during Run all."
+  ],
+  "steps": [
+    {
+      "id": "archive",
+      "index": "B2",
+      "name": "Archive, validate, EV solve",
+      "blurb": "One command: snapshots ownership, prices and fixtures, gates on validation, runs the stock solver, commits. If validation fails, read validation.log and fix the data rather than forcing past it.",
+      "command": "uv run python archive_solve.py --validate --push --note {note}",
+      "params": [
+        {
+          "name": "note",
+          "label": "Note",
+          "placeholder": "review elevenify dial = 50%",
+          "width": "wide"
+        }
+      ],
+      "gate": true,
+      "enabled": true
+    },
+    {
+      "id": "validate_deep",
+      "index": "B2b",
+      "name": "Deep source validation",
+      "blurb": "Optional and cheap. Adds the API availability cross-check on top of what the archive step already gated on. Needs mixed.csv, which only exists once the archive step's solve has run \u2014 hence its position here.",
+      "command": "uv run python validate_sources.py --sources solio review --mixed mixed.csv --bootstrap {ARCHIVE}/bootstrap_slim.json",
+      "enabled": false
+    },
+    {
+      "id": "enrich",
+      "index": "B3a",
+      "name": "Enrich from Solio",
+      "blurb": "Pulls published team clean-sheet odds and per-player DefCon probabilities from the free 4-hourly endpoint. If the fetch fails it refuses to write and the generator simply runs unenriched.",
+      "command": "uv run python solio_enrich.py --out {DATA}/enrich.json",
+      "enabled": true
+    },
+    {
+      "id": "scenarios",
+      "index": "B3b",
+      "name": "Generate scenarios",
+      "blurb": "Outcome sampling with team-level correlation. Check the printed calibration line \u2014 bias should land within \u00b10.05.",
+      "command": "uv run python scenario_generator.py --sources review solio --data-dir {DATA} --scenarios {scenarios} --out scenarios/ --horizon {horizon} --enrich {DATA}/enrich.json",
+      "params": [
+        {
+          "name": "scenarios",
+          "label": "Scenarios",
+          "default": "200"
+        },
+        {
+          "name": "horizon",
+          "label": "Horizon",
+          "default": "12"
+        }
+      ],
+      "enabled": true,
+      "clean": [
+        "scenarios"
+      ]
+    },
+    {
+      "id": "stochastic",
+      "index": "B4",
+      "name": "Stochastic transfer decision",
+      "blurb": "The committed stage-1 move plus the recourse branches \u2014 what you'd likely do next week in each world. Gap is 0.01 here by design: the two-stage problem won't close to zero in reasonable time.",
+      "command": "uv run python stochastic_solver.py --scenario-dir scenarios/ --squad {squad} --fts {fts} --itb {itb} --weeks {weeks} --use-scenarios {use_scenarios} --lam {lam} --gap 0.01 --bootstrap {ARCHIVE}/bootstrap_slim.json",
+      "params": [
+        {
+          "name": "squad",
+          "label": "Squad IDs",
+          "placeholder": "15 comma-separated ids",
+          "required": true,
+          "width": "wide"
+        },
+        {
+          "name": "fts",
+          "label": "Free transfers",
+          "default": "1"
+        },
+        {
+          "name": "itb",
+          "label": "In the bank",
+          "default": "0.0"
+        },
+        {
+          "name": "weeks",
+          "label": "Weeks",
+          "default": "5"
+        },
+        {
+          "name": "use_scenarios",
+          "label": "Scenarios used",
+          "default": "16"
+        },
+        {
+          "name": "lam",
+          "label": "Lambda",
+          "default": "0.3"
+        }
+      ],
+      "variant": true,
+      "enabled": true
+    },
+    {
+      "id": "stochastic_preseason",
+      "index": "A7",
+      "name": "Stochastic \u2014 preseason squad",
+      "blurb": "Builds the initial 15 under uncertainty instead of taking a transfer decision. Use for GW1 and wildcards, where --squad does not apply. --vss prices what planning under uncertainty bought over solving on the mean; near zero is a real finding, not a failure.",
+      "command": "uv run python stochastic_solver.py --scenario-dir scenarios/ --preseason --weeks {weeks} --use-scenarios {use_scenarios} --lam {lam} --gap 0.01 --bootstrap {ARCHIVE}/bootstrap_slim.json --vss",
+      "params": [
+        {
+          "name": "weeks",
+          "label": "Weeks",
+          "default": "4"
+        },
+        {
+          "name": "use_scenarios",
+          "label": "Scenarios used",
+          "default": "16"
+        },
+        {
+          "name": "lam",
+          "label": "Lambda",
+          "default": "0.3"
+        }
+      ],
+      "variant": true,
+      "enabled": false
+    },
+    {
+      "id": "cvar_evaluate",
+      "index": "B5a",
+      "name": "Score a squad's tail",
+      "blurb": "Run this when B2 and B4 disagree \u2014 score each candidate squad in turn. Agreement between the two solvers means you can skip it entirely.",
+      "command": "uv run python cvar_solver.py --scenario-dir scenarios/ --bootstrap {ARCHIVE}/bootstrap_slim.json --weeks {weeks} --evaluate {squad}",
+      "params": [
+        {
+          "name": "squad",
+          "label": "Squad IDs to score",
+          "placeholder": "post-transfer squad",
+          "required": true,
+          "width": "wide"
+        },
+        {
+          "name": "weeks",
+          "label": "Weeks",
+          "default": "4"
+        }
+      ],
+      "enabled": false
+    },
+    {
+      "id": "cvar_alt",
+      "index": "B5b",
+      "name": "CVaR alternative squad",
+      "blurb": "Builds a tail-safe squad against the effective-ownership field and compares it with the EV pick.",
+      "command": "uv run python cvar_solver.py --scenario-dir scenarios/ --bootstrap {ARCHIVE}/bootstrap_slim.json --weeks {weeks} --lam {lam} --alpha {alpha} --compare-ev",
+      "params": [
+        {
+          "name": "weeks",
+          "label": "Weeks",
+          "default": "4"
+        },
+        {
+          "name": "lam",
+          "label": "Lambda",
+          "default": "0.5"
+        },
+        {
+          "name": "alpha",
+          "label": "Alpha",
+          "default": "0.2"
+        }
+      ],
+      "variant": true,
+      "enabled": false
+    },
+    {
+      "id": "chip_enumerate",
+      "index": "C1",
+      "name": "Enumerate chip plans",
+      "blurb": "One full solve per chip-timing combination \u2014 minutes each, so start narrow. Consensus plans go in as candidates and are scored on identical footing with solver-found timings. Clears plans/ first: logs from an earlier projection vintage are not comparable with fresh ones.",
+      "command": "uv run python chip_planner.py enumerate --candidates {candidates} --workers {workers}",
+      "params": [
+        {
+          "name": "candidates",
+          "label": "Candidate plans",
+          "placeholder": "bb:1,fh:3,wc:7",
+          "required": true,
+          "width": "wide"
+        },
+        {
+          "name": "workers",
+          "label": "Workers",
+          "default": "2"
+        }
+      ],
+      "clean": [
+        "plans"
+      ],
+      "enabled": false
+    },
+    {
+      "id": "chips",
+      "index": "C2",
+      "name": "Score chip plans",
+      "blurb": "Scores every plan in plans/ across the scenario set: win share, regret, and a verdict line when the top two sit inside the noise band. Advisory only \u2014 it does not feed the solves above.",
+      "command": "uv run python chip_planner.py score --plans plans/ --scenario-dir scenarios/ --bootstrap {ARCHIVE}/bootstrap_slim.json",
+      "enabled": false
+    }
+  ]
+}
