@@ -166,7 +166,20 @@ def build_and_solve(meta, pts, F, d, cfg):
     pt = m.add_variables(range(1, W), scens, name="pt", lb=0)
     fts = m.add_variables(range(W + 1), scens, name="fts", lb=0, ub=FT_CAP, vartype=so.INT)
 
-    eta = m.add_variable(name="eta", lb=-1e6)
+    # eta is the VaR level, so it lies inside the range the score can take.
+    # A placeholder bound of -1e6 let the feasibility-jump heuristic open with
+    # an incumbent near 1e6 and then climb back, wasting most of the time
+    # limit. Bounding it to the achievable range costs nothing and removes
+    # that whole detour.
+    best_case = np.zeros(S)
+    for w_ in range(W):
+        top = np.sort(pts[:, :, w_], axis=1)[:, -LINEUP_SIZE:]
+        best_case += d[w_] * (top.sum(axis=1) + top[:, -1])  # XI + captain
+    eta_hi = float((best_case - F).max())
+    worst_case = -HIT_COST * FT_CAP * float(np.sum(d))
+    eta_lo = float((worst_case - F).min())
+    m_pad = 0.05 * max(abs(eta_hi), abs(eta_lo), 1.0)
+    eta = m.add_variable(name="eta", lb=eta_lo - m_pad, ub=eta_hi + m_pad)
     z = m.add_variables(scens, name="z", lb=0)
 
     def squad_at(p, w, s):

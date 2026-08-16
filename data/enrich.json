@@ -64,11 +64,11 @@
   },
   "BRE": {
    "gf": 1.53,
-   "ga": 1.45,
-   "cs": 0.2346
+   "ga": 1.44,
+   "cs": 0.2369
   },
   "TOT": {
-   "gf": 1.45,
+   "gf": 1.44,
    "ga": 1.53,
    "cs": 0.2165
   },
@@ -94,11 +94,11 @@
   },
   "SUN": {
    "cs": 0.27,
-   "ga": 1.31
+   "ga": 1.32
   },
   "IPS": {
    "cs": 0.26,
-   "ga": 1.34
+   "ga": 1.36
   }
  },
  "defcon": {
@@ -106,7 +106,7 @@
   "Canvot|CRY": 0.69,
   "Richards|CRY": 0.63,
   "Tarkowski|EVE": 0.55,
-  "Thomas|COV": 0.52,
+  "Thomas|COV": 0.53,
   "Egan|HUL": 0.51,
   "Sangar\u00e9|BRE": 0.5,
   "Scott|BOU": 0.49,
@@ -115,7 +115,7 @@
   "Muharemovi\u0107|LEE": 0.48,
   "Murillo|NFO": 0.47,
   "Silva|BOU": 0.46,
-  "Anderson|MCI": 0.46,
+  "Anderson|MCI": 0.45,
   "Ampadu|LEE": 0.44
  }
 }

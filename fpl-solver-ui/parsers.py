@@ -411,9 +411,22 @@ def load_plans(results_dir: Path, logs_dir: Optional[Path] = None) -> List[Dict[
     # today: cvar_solver and stochastic_solver print rather than writing plan
     # files, and the stock solver's Solution blocks are the variants to compare.
     if logs_dir and logs_dir.is_dir():
+        # The same solve reaches us twice: once as the solver's own results
+        # file and once as the stdout we captured. Same numbers, two rows,
+        # which reads as two candidate plans when it is one. Keep the results
+        # file (it carries team, position and price) and drop the echo.
+        def signature(plan: Dict[str, Any]) -> tuple:
+            t = plan.get("totals", {})
+            return (round(float(t.get("xpts", 0)), 1), len(plan.get("gameweeks", [])), int(t.get("moves", 0)), int(t.get("hits", 0)))
+
+        seen = {signature(p) for p in plans.values()}
         for path in sorted(logs_dir.glob("*.latest.log")):
             prefix = path.name.replace(".latest.log", "")
             for plan in read_plan_stdout(path, prefix):
+                sig = signature(plan)
+                if sig in seen:
+                    continue
+                seen.add(sig)
                 plans.setdefault(plan["variant"], plan)
 
     ordered = sorted(plans.values(), key=lambda p: -p["totals"].get("xpts", 0))
@@ -456,3 +469,144 @@ def build_comparison(plans: List[Dict[str, Any]]) -> Dict[str, Any]:
         "noise_band": NOISE_BAND_XPTS,
         "tied_count": sum(1 for r in rows if r["tied"]),
     }
+
+
+# ------------------------------------------------- squad ID auto-discovery
+
+STAGE1_HEADER = "Stage-1 squad"
+ID_ROW_RE = re.compile(r"^\s*(\d{1,4})\s+\S")
+BUY_RE = re.compile(r"^\s+Buy (\d+) - ")
+GW_HEAD_RE = re.compile(r"^\s+\*\* GW (\d+):")
+SQUAD_SIZE = 15
+
+
+def _ids_from_stage1(text: str) -> List[int]:
+    """The stage-1 table printed by stochastic_solver.py --preseason."""
+    if STAGE1_HEADER not in text:
+        return []
+    out: List[int] = []
+    for line in text.split(STAGE1_HEADER, 1)[1].splitlines():
+        if line.strip().startswith("ID"):
+            continue
+        m = ID_ROW_RE.match(line)
+        if m:
+            out.append(int(m.group(1)))
+        elif out:
+            break  # table ended
+    return out[:SQUAD_SIZE]
+
+
+def _ids_from_first_gw_buys(text: str) -> List[int]:
+    """Preseason EV solve: every player is a Buy in the first gameweek."""
+    out: List[int] = []
+    started = False
+    for line in text.splitlines():
+        head = GW_HEAD_RE.match(line)
+        if head:
+            if started:
+                break
+            started = True
+            continue
+        if started:
+            m = BUY_RE.match(line)
+            if m:
+                out.append(int(m.group(1)))
+    return out[:SQUAD_SIZE]
+
+
+SELL_RE = re.compile(r"^\s+Sell (\d+) - ")
+
+
+def _apply_first_gw_transfers(text: str, base: List[int]) -> List[int]:
+    """Mid-season: the solve prints only the moves, not the squad.
+
+    The post-transfer squad is what B5a needs to score, so derive it by
+    applying the first gameweek's Buy/Sell to your current team rather than
+    making you reconstruct it by hand."""
+    ins: List[int] = []
+    outs: List[int] = []
+    started = False
+    for line in text.splitlines():
+        head = GW_HEAD_RE.match(line)
+        if head:
+            if started:
+                break
+            started = True
+            continue
+        if not started:
+            continue
+        mi, mo = BUY_RE.match(line), SELL_RE.match(line)
+        if mi:
+            ins.append(int(mi.group(1)))
+        elif mo:
+            outs.append(int(mo.group(1)))
+    if not ins or len(ins) != len(outs):
+        return []
+    squad = [p for p in base if p not in outs] + ins
+    return squad if len(squad) == SQUAD_SIZE else []
+
+
+def discover_squads(logs_dir: Optional[Path], archive_dir: Optional[Path]) -> List[Dict[str, Any]]:
+    """
+    Squad ID lists worth offering as one-click fills.
+
+    Typing fifteen IDs by hand before every solve is both slow and an easy
+    place to make a silent mistake — a wrong ID is a valid solve of the wrong
+    problem. Every source here is something an earlier step already produced.
+    """
+    found: List[Dict[str, Any]] = []
+
+    # your actual team, from the API snapshot the archive step takes
+    if archive_dir and archive_dir.is_dir():
+        picks = sorted(archive_dir.glob("picks_gw*.json"))
+        if picks:
+            try:
+                data = json.loads(picks[-1].read_text())
+                ids = [int(p["element"]) for p in data.get("picks", [])]
+                if ids:
+                    found.append(
+                        {
+                            "key": "current",
+                            "label": f"Your team ({picks[-1].stem.replace('picks_', '').upper()})",
+                            "ids": ids[:SQUAD_SIZE],
+                            "note": "from the FPL API snapshot in this archive",
+                        }
+                    )
+            except (OSError, json.JSONDecodeError, KeyError, ValueError):
+                pass
+
+    if logs_dir and logs_dir.is_dir():
+        for path in sorted(logs_dir.glob("*.latest.log")):
+            try:
+                text = path.read_text(encoding="utf-8", errors="replace")
+            except OSError:
+                continue
+            step = path.name.replace(".latest.log", "")
+
+            ids = _ids_from_stage1(text)
+            if len(ids) == SQUAD_SIZE:
+                found.append(
+                    {"key": f"{step}_stage1", "label": f"{step} · stage-1 squad", "ids": ids, "note": "committed decision under uncertainty"}
+                )
+                continue
+
+            ids = _ids_from_first_gw_buys(text)
+            if len(ids) == SQUAD_SIZE:
+                found.append(
+                    {"key": f"{step}_gw1", "label": f"{step} · EV solve squad", "ids": ids, "note": "first-gameweek squad from the stock solver"}
+                )
+                continue
+
+            current = next((f["ids"] for f in found if f["key"] == "current"), [])
+            if current:
+                ids = _apply_first_gw_transfers(text, current)
+                if ids:
+                    found.append(
+                        {
+                            "key": f"{step}_post",
+                            "label": f"{step} · after this week's move",
+                            "ids": ids,
+                            "note": "your team with the first-gameweek transfers applied",
+                        }
+                    )
+    return found

@@ -457,3 +457,23 @@ main { padding: 28px var(--gut) 80px; min-width: 0; }
 }
 .param input:focus { border-color: var(--live); outline: none; }
 .param input::placeholder { color: var(--faint); }
+
+/* Squad auto-fill: sits above its input, styled as a quiet control so it
+   reads as an affordance rather than another required field. */
+.squad-fill {
+  appearance: none;
+  align-self: start;
+  margin-bottom: 6px;
+  padding: 4px 26px 4px 9px;
+  font: 500 11px/1.4 var(--mono);
+  letter-spacing: .04em;
+  color: var(--live);
+  background: var(--panel-2)
+    url("data:image/svg+xml;charset=utf8,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 10 6'%3E%3Cpath fill='%2304F5FF' d='M0 0h10L5 6z'/%3E%3C/svg%3E")
+    no-repeat right 9px center / 8px;
+  border: 1px solid var(--line);
+  border-radius: 5px;
+  cursor: pointer;
+}
+.squad-fill:hover:not(:disabled) { border-color: var(--live); }
+.squad-fill:disabled { color: var(--faint); cursor: default; opacity: .6; }

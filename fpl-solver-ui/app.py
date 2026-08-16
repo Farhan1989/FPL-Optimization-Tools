@@ -545,6 +545,11 @@ async def run_all() -> Dict[str, Any]:
     return {"steps": [s["id"] for s in steps]}
 
 
+@app.get("/api/squads")
+async def squads() -> Dict[str, Any]:
+    return {"squads": parsers.discover_squads(LOG_DIR, resolve_archive())}
+
+
 @app.get("/api/plans")
 async def plans() -> Dict[str, Any]:
     found = parsers.load_plans(RESULTS_DIR, LOG_DIR)

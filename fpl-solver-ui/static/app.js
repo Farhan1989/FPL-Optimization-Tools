@@ -25,6 +25,38 @@ async function api(path, opts = {}) {
   return body;
 }
 
+const squadCache = { list: [], loaded: false };
+
+async function loadSquads() {
+  try {
+    const out = await api('/api/squads');
+    squadCache.list = out.squads || [];
+  } catch { squadCache.list = []; }
+  squadCache.loaded = true;
+  $$('select[data-squad-fill]').forEach(fillSquadOptions);
+}
+
+/* Fifteen IDs typed by hand before every solve is slow, and a mistyped ID is
+   a valid solve of the wrong problem — it fails silently. Every option here
+   is something an earlier step already produced. */
+function fillSquadOptions(sel) {
+  const keep = sel.value;
+  sel.innerHTML = '';
+  const blank = document.createElement('option');
+  blank.value = '';
+  blank.textContent = squadCache.list.length ? 'Fill from…' : 'no squads found yet';
+  sel.append(blank);
+  squadCache.list.forEach(sq => {
+    const o = document.createElement('option');
+    o.value = sq.key;
+    o.textContent = sq.label;
+    o.title = sq.note || '';
+    sel.append(o);
+  });
+  sel.value = keep;
+  sel.disabled = !squadCache.list.length;
+}
+
 const state = { invariants: {}, settings: {}, dirty: false, plans: [], active: null };
 
 /* ------------------------------------------------------------ navigation */
@@ -279,6 +311,18 @@ function renderSteps(steps) {
         input.type = 'text';
         input.dataset.param = p.name;
         input.placeholder = p.placeholder || '';
+        if (p.name === 'squad') {
+          const pick = document.createElement('select');
+          pick.className = 'squad-fill';
+          pick.dataset.squadFill = '1';
+          pick.onchange = () => {
+            const sq = squadCache.list.find(s => s.key === pick.value);
+            if (sq) { input.value = sq.ids.join(','); input.dispatchEvent(new Event('change')); }
+            pick.value = '';
+          };
+          field.append(pick);
+          fillSquadOptions(pick);
+        }
         input.value = (step.saved_params && step.saved_params[p.name])
           ?? (state.settingsDefaults && state.settingsDefaults[p.name])
           ?? p.default ?? '';
@@ -369,7 +413,7 @@ function attachStream(stepId, runId) {
       btn.disabled = false;
       btn.textContent = 'Run again';
       btn.onclick = () => startRun(stepId);
-      if (msg.text === 'ok') loadPlans();
+      if (msg.text === 'ok') { loadPlans(); loadSquads(); }
       return;
     }
     const atBottom = console_.scrollHeight - console_.scrollTop - console_.clientHeight < 40;
@@ -431,6 +475,7 @@ $('#run-all').onclick = async () => {
     btn.disabled = false;
     btn.textContent = 'Run all steps';
     loadPlans();
+  loadSquads();
   }
 };
 
