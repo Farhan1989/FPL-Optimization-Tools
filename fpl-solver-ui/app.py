@@ -16,6 +16,8 @@ import os
 import re
 import shlex
 import shutil
+import subprocess
+import sys
 import signal
 import time
 import uuid
@@ -44,6 +46,11 @@ LOG_DIR = HERE / ".runs"
 
 for d in (DATA_DIR, RESULTS_DIR, LOG_DIR):
     d.mkdir(parents=True, exist_ok=True)
+
+# macOS sleeps the machine when the lid closes, which suspends the solve AND
+# keeps burning the solver's wall-clock time limit. caffeinate holds the
+# assertion only while the child runs, so nothing leaks past the step.
+KEEP_AWAKE = shutil.which("caffeinate") if sys.platform == "darwin" else None
 
 ALLOWED_UPLOAD_SUFFIXES = {".csv", ".json"}
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
@@ -189,6 +196,10 @@ def clean_targets(step: Dict[str, Any]) -> List[str]:
 async def launch(step: Dict[str, Any], params: Optional[Dict[str, str]] = None) -> Run:
     argv = build_argv(step["command"], params or {})
     command = shlex.join(argv)
+    if KEEP_AWAKE and step.get("keep_awake", True):
+        # -i no idle sleep, -s no system sleep on AC. caffeinate becomes the
+        # group leader, so cancelling still signals the whole tree.
+        argv = [KEEP_AWAKE, "-is", *argv]
     run = Run(uuid.uuid4().hex[:12], step["id"], command)
     RUNS[run.id] = run
     LAST_RUN_BY_STEP[step["id"]] = run.id
@@ -198,6 +209,8 @@ async def launch(step: Dict[str, Any], params: Optional[Dict[str, str]] = None) 
 
     for rel in clean_targets(step):
         run.emit("meta", f"# cleared {rel}/ before running")
+    if KEEP_AWAKE and step.get("keep_awake", True):
+        run.emit("meta", "# caffeinate: the machine will stay awake until this finishes")
     run.emit("meta", f"$ {command}")
     try:
         proc = await asyncio.create_subprocess_exec(
@@ -378,14 +391,90 @@ async def run_step(step_id: str, payload: Optional[RunPayload] = None) -> Dict[s
     return {"run_id": run.id, "command": run.command}
 
 
+TERM_GRACE_SECONDS = 4.0
+
+
+def descendants(pid: int) -> List[int]:
+    """Every process below pid, oldest-first.
+
+    killpg should be enough — caffeinate does not change process group, so the
+    solver inherits ours. But a wrapper that DID reparent would silently leave
+    the solve running while the UI reported it cancelled, and a stray HiGHS
+    holding 8 cores is an expensive thing to be wrong about. Cheap insurance."""
+    try:
+        out = subprocess.run(["ps", "-Ao", "pid=,ppid="], capture_output=True, text=True, check=False, timeout=5).stdout
+    except (OSError, subprocess.SubprocessError):
+        return []
+    children: Dict[int, List[int]] = {}
+    for row in out.splitlines():
+        parts = row.split()
+        if len(parts) == 2:
+            try:
+                children.setdefault(int(parts[1]), []).append(int(parts[0]))
+            except ValueError:
+                continue
+    found, stack = [], [pid]
+    while stack:
+        for kid in children.get(stack.pop(), []):
+            found.append(kid)
+            stack.append(kid)
+    return found
+
+
+async def stop_run(run: Run) -> str:
+    """SIGTERM, then SIGKILL if it is ignored.
+
+    HiGHS spends minutes inside a single C call, and Python only acts on a
+    signal between bytecode instructions — so a solving process genuinely
+    does ignore SIGTERM until the call returns. SIGKILL cannot be ignored.
+    Signals go to the process group so caffeinate, uv and python all go."""
+    run.cancelled = True
+    try:
+        pgid = os.getpgid(run.process.pid)
+    except ProcessLookupError:
+        run.emit("meta", "# process had already exited")
+        return "gone"
+
+    tree = [run.process.pid, *descendants(run.process.pid)]
+    os.killpg(pgid, signal.SIGTERM)
+    run.emit("meta", "# SIGTERM sent, giving it a moment to exit cleanly...")
+    for _ in range(int(TERM_GRACE_SECONDS * 10)):
+        if run.finished_at is not None:
+            return "terminated"
+        await asyncio.sleep(0.1)
+
+    try:
+        os.killpg(pgid, signal.SIGKILL)
+        run.emit("meta", "# still solving after SIGTERM — SIGKILL sent")
+    except ProcessLookupError:
+        return "terminated"
+
+    # Sweep anything the group signal missed.
+    await asyncio.sleep(0.4)
+    stragglers = []
+    for pid in tree:
+        try:
+            os.kill(pid, 0)
+        except (ProcessLookupError, PermissionError):
+            continue
+        try:
+            os.kill(pid, signal.SIGKILL)
+            stragglers.append(pid)
+        except (ProcessLookupError, PermissionError):
+            pass
+    if stragglers:
+        run.emit("meta", f"# swept {len(stragglers)} surviving child process(es)")
+    return "killed"
+
+
 @app.post("/api/cancel/{run_id}")
 async def cancel(run_id: str) -> Dict[str, Any]:
     run = RUNS.get(run_id)
-    if not run or not run.process or run.finished_at is not None:
-        raise HTTPException(404, "That run has already finished.")
-    run.cancelled = True
-    os.killpg(os.getpgid(run.process.pid), signal.SIGTERM)
-    return {"cancelled": True}
+    if not run or not run.process:
+        raise HTTPException(404, "No such run on this server. If the server was restarted, kill it from a shell instead.")
+    if run.finished_at is not None:
+        raise HTTPException(409, "That run has already finished.")
+    return {"cancelled": True, "how": await stop_run(run)}
 
 
 @app.get("/api/run/{run_id}")

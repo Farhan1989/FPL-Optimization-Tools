@@ -199,6 +199,7 @@ dependencies = [
     { name = "python-levenshtein" },
     { name = "python-multipart" },
     { name = "requests" },
+    { name = "sasoptpy" },
     { name = "tabulate" },
     { name = "uvicorn", extra = ["standard"] },
 ]
@@ -224,6 +225,7 @@ requires-dist = [
     { name = "python-multipart", specifier = ">=0.0.32" },
     { name = "requests" },
     { name = "ruff", marker = "extra == 'dev'" },
+    { name = "sasoptpy", specifier = ">=1.0.5" },
     { name = "tabulate", specifier = ">=0.9.0" },
     { name = "uvicorn", extras = ["standard"], specifier = ">=0.52.3" },
 ]
@@ -683,6 +685,15 @@ wheels = [
 ]
 
 [[package]]
+name = "pytz"
+version = "2026.3.post1"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/fb/48/fb042503b6ca6cd271261dc559fd6432f7d8c713153e9ec5c591af4dfc1c/pytz-2026.3.post1.tar.gz", hash = "sha256:2211d3fcf9a797d3405cac96ac7f61d80e6a644f72a3309607282fe8a2010c5d", size = 319745, upload-time = "2026-07-25T15:12:07.385Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/0f/7b/39c34ca613b0b198cb866466651b26b045e2009864c5183c979a3b83f383/pytz-2026.3.post1-py2.py3-none-any.whl", hash = "sha256:dd95840dd199baea12d9cc096a1d452caa6596a1c1e4b5f3dbd1541855d5e815", size = 508283, upload-time = "2026-07-25T15:12:05.782Z" },
+]
+
+[[package]]
 name = "pyyaml"
 version = "6.0.3"
 source = { registry = "https://pypi.org/simple" }
@@ -779,6 +790,30 @@ wheels = [
 ]
 
 [[package]]
+name = "sasoptpy"
+version = "1.0.5"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "numpy" },
+    { name = "pandas" },
+    { name = "saspy" },
+    { name = "swat" },
+]
+sdist = { url = "https://files.pythonhosted.org/packages/f1/b1/6dacc7272bcdf52406019aa3743c189b90a430294c3239c52821bb1e1aaa/sasoptpy-1.0.5.tar.gz", hash = "sha256:2fc7b45f078d7832759a746c68d71794ae31146806ea5d046c646b7eb4f90e5e", size = 141030, upload-time = "2022-03-01T19:07:16.207Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/cd/5d/3b0191a69b8f11feead6a7b273941a74f12427e825cb33786a9b83590718/sasoptpy-1.0.5-py3-none-any.whl", hash = "sha256:f61aae89b4b3a8d6eaea405e2f3544bfaff67b2d88031925dc4755a7a44280e2", size = 103904, upload-time = "2022-03-01T19:07:15.015Z" },
+]
+
+[[package]]
+name = "saspy"
+version = "5.108.6"
+source = { registry = "https://pypi.org/simple" }
+sdist = { url = "https://files.pythonhosted.org/packages/bf/69/37a609a83bbb8a86ebcb675b1c0592db94bdcefd51434bac6211b09d4153/saspy-5.108.6.tar.gz", hash = "sha256:9e949888f66d8227e27e53e1e5ddb4f65d434e2e3cbc04a2d38609d73a3af349", size = 7106184, upload-time = "2026-07-23T20:30:25.705Z" }
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/24/0b/4c6e8746d40f80df00ea8cfc7dda6c56790184d2d5fb5cd2e78d4a998b43/saspy-5.108.6-py3-none-any.whl", hash = "sha256:f57787331c5b4b5c754de10f6a92eace7f7bc20a1b513e09eb8bd1a25dd347d6", size = 7120218, upload-time = "2026-07-23T20:30:23.492Z" },
+]
+
+[[package]]
 name = "six"
 version = "1.17.0"
 source = { registry = "https://pypi.org/simple" }
@@ -797,6 +832,24 @@ dependencies = [
 sdist = { url = "https://files.pythonhosted.org/packages/b5/b4/205b0d5241d934e8add0c38aa924c4f9fb7330834ff11e5444db964ec3f9/starlette-1.6.0.tar.gz", hash = "sha256:d4e3ac5e546444960c710297a3c9fc3f7ebae1b7e963f3d36173b49da535be9b", size = 2716969, upload-time = "2026-08-08T18:27:57.512Z" }
 wheels = [
     { url = "https://files.pythonhosted.org/packages/c8/cb/6a6a47d5b464bd08695d254f3da6e7986cc70c9fa5d778eda57538edfe56/starlette-1.6.0-py3-none-any.whl", hash = "sha256:a86dd39d14bb45f85a3d18525215a9ef0cfd1f192ac793220e72598c90335f0c", size = 75969, upload-time = "2026-08-08T18:27:56.196Z" },
+]
+
+[[package]]
+name = "swat"
+version = "1.18.1"
+source = { registry = "https://pypi.org/simple" }
+dependencies = [
+    { name = "pandas" },
+    { name = "pytz" },
+    { name = "requests" },
+    { name = "six" },
+    { name = "urllib3" },
+]
+wheels = [
+    { url = "https://files.pythonhosted.org/packages/aa/f8/30d02d45a6de559bbc1d7bcb2f33b19697176bfb46b720f2e5adfd435096/swat-1.18.1-0-cp314-cp314-macosx_10_9_x86_64.whl", hash = "sha256:149a96343a27a4337ac477fca083ea5fd61c54020830687f193943d7eae8c637", size = 467853, upload-time = "2026-06-30T09:26:52.713Z" },
+    { url = "https://files.pythonhosted.org/packages/60/39/48afbeaa2ba6912fe01f83d3ad2e362dffad6400454d0afcbd75ce153061/swat-1.18.1-0-cp314-cp314-macosx_11_0_arm64.whl", hash = "sha256:a75b895a30704ec2ae1f75e9b15be4dc42ef2f3d5295b3b066dd811436356685", size = 467852, upload-time = "2026-06-30T09:26:54.067Z" },
+    { url = "https://files.pythonhosted.org/packages/1a/df/333013b1986a3bc1381b1761a1725fef1d29ad3580b08752bb53c2b36cd2/swat-1.18.1-0-cp314-cp314-manylinux1_x86_64.whl", hash = "sha256:847b344e8fe2872aadf4c2b9d1a2dd766df3a6aac58649656562d4600a1849fb", size = 46778463, upload-time = "2026-06-30T09:26:55.94Z" },
+    { url = "https://files.pythonhosted.org/packages/2d/db/115d08815faea792d31552ca71ade7add66e978f569f39e1f0b5ab6f798a/swat-1.18.1-0-cp314-cp314-win_amd64.whl", hash = "sha256:be0ddb9ebd7ea32fe01211ddb0d4eca79849597b0b07b7517acb7f4ba6a9bfe9", size = 61537814, upload-time = "2026-06-30T09:26:59.369Z" },
 ]
 
 [[package]]

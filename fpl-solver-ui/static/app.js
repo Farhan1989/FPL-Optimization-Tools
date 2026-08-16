@@ -307,6 +307,9 @@ function renderSteps(steps) {
       step.last_run.tail.forEach(l => console_.append(line(l)));
     }
     wrap.append(card);
+    if (step.last_run && step.last_run.status === 'running') {
+      attachStream(step.id, step.last_run.id);
+    }
   });
 }
 
@@ -315,6 +318,65 @@ function line(text, kind = 'line') {
     ? 'l-bad' : '');
   span.textContent = text + '\n';
   return span;
+}
+
+function setStopButton(stepId, runId) {
+  const card = $(`#step-${stepId}`);
+  const btn = $('.step-actions .btn', card);
+  const console_ = $('.console', card);
+  btn.textContent = 'Stop';
+  btn.disabled = false;
+  btn.onclick = async () => {
+    btn.disabled = true;
+    btn.textContent = 'Stopping\u2026';
+    try {
+      // A solving process ignores SIGTERM until HiGHS returns from its C
+      // call, so the server escalates to SIGKILL. Report which happened
+      // rather than swallowing it — silence is what made this look broken.
+      const out = await api(`/api/cancel/${runId}`, { method: 'POST' });
+      console_.append(line(`# cancel: ${out.how}`, 'meta'));
+    } catch (err) {
+      console_.append(line(`# cancel failed: ${err.message}`, 'meta'));
+      btn.disabled = false;
+      btn.textContent = 'Stop';
+    }
+  };
+}
+
+/* Re-attach to a run still in flight after a page load. Without this a
+   refresh orphans it: the solve keeps running server-side but the card shows
+   a plain Run button, so the next click starts a second one. */
+function attachStream(stepId, runId) {
+  const card = $(`#step-${stepId}`);
+  const console_ = $('.console', card);
+  const status = $('.status', card);
+  const btn = $('.step-actions .btn', card);
+
+  console_.hidden = false;
+  card.dataset.status = 'running';
+  status.dataset.s = 'running';
+  status.textContent = 'running';
+  setStopButton(stepId, runId);
+
+  const src = new EventSource(`/api/stream/${runId}`);
+  src.onmessage = ev => {
+    const msg = JSON.parse(ev.data);
+    if (msg.kind === 'end') {
+      src.close();
+      card.dataset.status = msg.text;
+      status.dataset.s = msg.text;
+      status.textContent = msg.text;
+      btn.disabled = false;
+      btn.textContent = 'Run again';
+      btn.onclick = () => startRun(stepId);
+      if (msg.text === 'ok') loadPlans();
+      return;
+    }
+    const atBottom = console_.scrollHeight - console_.scrollTop - console_.clientHeight < 40;
+    console_.append(line(msg.text, msg.kind));
+    if (atBottom) console_.scrollTop = console_.scrollHeight;
+  };
+  src.onerror = () => src.close();
 }
 
 async function startRun(stepId) {
@@ -349,27 +411,7 @@ async function startRun(stepId) {
     return;
   }
 
-  btn.textContent = 'Stop';
-  btn.onclick = () => api(`/api/cancel/${runId}`, { method: 'POST' }).catch(() => {});
-
-  const src = new EventSource(`/api/stream/${runId}`);
-  src.onmessage = ev => {
-    const msg = JSON.parse(ev.data);
-    if (msg.kind === 'end') {
-      src.close();
-      card.dataset.status = msg.text;
-      status.dataset.s = msg.text;
-      status.textContent = msg.text;
-      btn.textContent = 'Run again';
-      btn.onclick = () => startRun(stepId);
-      if (msg.text === 'ok') loadPlans();
-      return;
-    }
-    const atBottom = console_.scrollHeight - console_.scrollTop - console_.clientHeight < 40;
-    console_.append(line(msg.text, msg.kind));
-    if (atBottom) console_.scrollTop = console_.scrollHeight;
-  };
-  src.onerror = () => src.close();
+  attachStream(stepId, runId);
 }
 
 $('#run-all').onclick = async () => {

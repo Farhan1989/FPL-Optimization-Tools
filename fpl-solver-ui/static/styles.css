@@ -1,20 +1,22 @@
 /* =========================================================================
    Solver console
-   Palette borrows the competition's own aubergine rather than a generic dark
-   theme; green and red are reserved strictly for transfer direction, so colour
-   never decorates — it always means something.
+   Neutrals are the brand teal (#1C7480) at reduced saturation, so every
+   surface shares one hue. Lightness is preserved from the original palette,
+   which keeps the contrast ratios intact. Green and red stay reserved
+   strictly for transfer direction — colour never decorates here, it always
+   means something.
    ====================================================================== */
 
 :root {
-  --ink:        #17101F;
-  --panel:      #1E1629;
-  --panel-2:    #271D34;
-  --aubergine:  #37003C;
-  --chalk:      #F1ECF5;
-  --mute:       #9C8EA9;
-  --faint:      #6C5F79;
-  --line:       #342941;
-  --line-soft:  #2A2036;
+  --ink:        #111C1E;
+  --panel:      #172628;
+  --panel-2:    #1F3032;
+  --brand:      #1C7480;
+  --chalk:      #ECF4F5;
+  --mute:       #8FA5A8;
+  --faint:      #607578;
+  --line:       #2B3D3F;
+  --line-soft:  #223234;
 
   --in:         #00E08C;
   --out:        #FF4E6A;
@@ -59,7 +61,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
   display: flex; align-items: center; justify-content: space-between;
   gap: var(--gut);
   padding: 16px var(--gut);
-  background: linear-gradient(180deg, var(--aubergine), #2B0230);
+  background: linear-gradient(180deg, var(--brand), #124B54);
   border-bottom: 1px solid var(--line);
   position: sticky; top: 0; z-index: 20;
 }
@@ -82,7 +84,7 @@ button { font: inherit; color: inherit; cursor: pointer; }
 
 .paths {
   margin: 2px 0 0; font-family: var(--mono); font-size: 11px;
-  color: #C4A9C9; letter-spacing: 0.01em;
+  color: #ABC4C7; letter-spacing: 0.01em;
 }
 
 .topbar-actions { display: flex; align-items: center; gap: 12px; }
@@ -135,7 +137,7 @@ main { padding: 28px var(--gut) 80px; min-width: 0; }
   border-radius: var(--r); padding: 8px 14px; font-size: 13.5px; font-weight: 500;
   transition: border-color .12s, background .12s;
 }
-.btn:hover { border-color: var(--faint); background: #2E2340; }
+.btn:hover { border-color: var(--faint); background: #253B3E; }
 .btn:disabled { opacity: .45; cursor: not-allowed; }
 .btn-primary { background: var(--live); color: #0B2126; border-color: transparent; font-weight: 600; }
 .btn-primary:hover { background: #6BFAFF; border-color: transparent; }
@@ -217,7 +219,7 @@ main { padding: 28px var(--gut) 80px; min-width: 0; }
   background: var(--panel); border: 1px solid var(--line);
   border-radius: var(--r); padding: 12px 14px;
 }
-.field.is-locked { border-color: #4A3A2A; }
+.field.is-locked { border-color: #4A4230; }
 .field-top { display: flex; align-items: center; justify-content: space-between; gap: 8px; margin-bottom: 7px; }
 .field label { font-family: var(--mono); font-size: 12px; color: var(--chalk); word-break: break-all; }
 .field .lock { font-size: 10px; letter-spacing: .06em; color: var(--flag); font-family: var(--mono); }
@@ -296,10 +298,10 @@ main { padding: 28px var(--gut) 80px; min-width: 0; }
   color: var(--flag); border: 1px solid currentColor; border-radius: 4px; padding: 1px 5px; }
 
 .console {
-  background: #100B16; border-top: 1px solid var(--line);
+  background: #0C1415; border-top: 1px solid var(--line);
   font-family: var(--mono); font-size: 12px; line-height: 1.55;
   padding: 12px 16px; max-height: 300px; overflow: auto; white-space: pre-wrap;
-  word-break: break-word; color: #C9BCD6;
+  word-break: break-word; color: #BDD2D5;
 }
 .console .l-meta { color: var(--live); }
 .console .l-bad  { color: var(--out); }
