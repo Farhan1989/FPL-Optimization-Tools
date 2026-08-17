@@ -48,8 +48,8 @@
       "id": "scenarios",
       "index": "B3b",
       "name": "Generate scenarios",
-      "blurb": "Outcome sampling with team-level correlation. Check the printed calibration line \u2014 bias should land within \u00b10.05.",
-      "command": "uv run python scenario_generator.py --sources review solio --data-dir {DATA} --scenarios {scenarios} --out scenarios/ --horizon {horizon} --enrich {DATA}/enrich.json",
+      "blurb": "Outcome sampling with team-level correlation. Check the printed calibration line \u2014 bias should land within \u00b10.05. Change the seed to regenerate an independent set \u2014 scoring a squad on scenarios it was not built from is the only way to tell optimisation from overfitting.",
+      "command": "uv run python scenario_generator.py --sources review solio --data-dir {DATA} --scenarios {scenarios} --out scenarios/ --horizon {horizon} --seed {seed} --enrich {DATA}/enrich.json",
       "params": [
         {
           "name": "scenarios",
@@ -60,6 +60,11 @@
           "name": "horizon",
           "label": "Horizon",
           "default": "12"
+        },
+        {
+          "name": "seed",
+          "label": "Seed",
+          "default": "42"
         }
       ],
       "enabled": true,

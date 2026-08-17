@@ -43,7 +43,6 @@ Usage
 Outputs the chosen squad, its E[Delta], CVaR, P(beat field), and the same
 metrics for lambda=0 for comparison.
 """
-# ruff: noqa: PLR0915, PLR2004, PLC0415, N803, N806, PLR0913, PLR0917
 
 from __future__ import annotations
 
@@ -104,6 +103,42 @@ def load_field(bootstrap: Path, meta: pd.DataFrame, proj_total: np.ndarray):
     return w_own + cap, w_own, cap
 
 
+def legal_formations() -> list[tuple[int, int, int]]:
+    """Every valid outfield split: 1 GK plus 10, within FPL position limits."""
+    out = []
+    for d in range(LINEUP_MIN["DEF"], LINEUP_MAX["DEF"] + 1):
+        for m in range(LINEUP_MIN["MID"], LINEUP_MAX["MID"] + 1):
+            f = LINEUP_SIZE - 1 - d - m
+            if LINEUP_MIN["FWD"] <= f <= LINEUP_MAX["FWD"]:
+                out.append((d, m, f))
+    return out
+
+
+def best_legal_xi(rows: list[int], meta: pd.DataFrame, week_pts: np.ndarray) -> list[int]:
+    """
+    Highest-scoring XI that is actually a legal FPL formation.
+
+    The previous greedy capped positions at their MAXIMUM but never enforced
+    the MINIMUM, so it could field two defenders and five midfielders — a team
+    you cannot submit. It flattered every evaluated squad, because it played a
+    best-eleven that the rules forbid. With 15 players and eight formations,
+    exact enumeration is cheap, so there is no reason to approximate.
+    """
+    by_pos = {q: sorted((p for p in rows if meta.Pos.iloc[p] == q), key=lambda p: -week_pts[p]) for q in POS_QUOTA}
+    if not by_pos["GKP"]:
+        return sorted(rows, key=lambda p: -week_pts[p])[:LINEUP_SIZE]
+    keeper = by_pos["GKP"][0]
+    best, best_total = None, -np.inf
+    for d, m, f in legal_formations():
+        if len(by_pos["DEF"]) < d or len(by_pos["MID"]) < m or len(by_pos["FWD"]) < f:
+            continue
+        xi = [keeper] + by_pos["DEF"][:d] + by_pos["MID"][:m] + by_pos["FWD"][:f]
+        total = float(week_pts[xi].sum())
+        if total > best_total:
+            best, best_total = xi, total
+    return best or sorted(rows, key=lambda p: -week_pts[p])[:LINEUP_SIZE]
+
+
 # --------------------------------------------------------------------- pool
 
 
@@ -138,7 +173,18 @@ def solve_cvar(meta, gws, pts, F, lam, alpha, decay, secs, forced=None):
     x = m.add_variables(players, name="squad", vartype=so.BIN)
     y = m.add_variables(players, weeks, name="lineup", vartype=so.BIN)
     c = m.add_variables(players, weeks, name="captain", vartype=so.BIN)
-    eta = m.add_variable(name="eta", lb=-1e6)
+    # eta is the VaR level, so it lies inside the achievable score range.
+    # A -1e6 placeholder let the feasibility-jump heuristic open near 5e5 and
+    # climb back, which is wasted search.
+    d_arr = np.array([decay**i for i in range(W)])
+    best_case = np.zeros(S)
+    for w_ in range(W):
+        top = np.sort(pts[:, :, w_], axis=1)[:, -LINEUP_SIZE:]
+        best_case += d_arr[w_] * (top.sum(axis=1) + top[:, -1])
+    eta_hi = float((best_case - F).max())
+    eta_lo = float((-F).min())
+    pad = 0.05 * max(abs(eta_hi), abs(eta_lo), 1.0)
+    eta = m.add_variable(name="eta", lb=eta_lo - pad, ub=eta_hi + pad)
     z = m.add_variables(range(S), name="cvar_slack", lb=0)
 
     pos = meta.Pos.to_numpy()
@@ -247,24 +293,11 @@ def main() -> int:
     if args.evaluate:
         ids = [int(i) for i in args.evaluate.split(",")]
         rows = np.where(meta.ID.isin(ids))[0].tolist()
-        # greedy best lineup+captain per week by scenario-mean pts
         mean_pts = pts.mean(axis=0)
         lineup, caps = {}, {}
         for w in range(len(gws)):
-            order = sorted(rows, key=lambda p: -mean_pts[p, w])
-            xi, counts = [], dict.fromkeys(POS_QUOTA, 0)
-            gk = [p for p in order if meta.Pos.iloc[p] == "GKP"][:1]
-            xi += gk
-            counts["GKP"] = 1
-            for p in order:
-                if p in xi or meta.Pos.iloc[p] == "GKP" or len(xi) >= LINEUP_SIZE:
-                    continue
-                q = meta.Pos.iloc[p]
-                if counts[q] < LINEUP_MAX[q]:
-                    xi.append(p)
-                    counts[q] += 1
-            lineup[w] = xi
-            caps[w] = max(xi, key=lambda p: mean_pts[p, w])
+            lineup[w] = best_legal_xi(rows, meta, mean_pts[:, w])
+            caps[w] = max(lineup[w], key=lambda p: mean_pts[p, w])
         delta = portfolio_delta(pts, d, F, lineup, caps)
         print("\n[cvar] evaluation of supplied squad:")
         describe("supplied", delta, args.alpha)

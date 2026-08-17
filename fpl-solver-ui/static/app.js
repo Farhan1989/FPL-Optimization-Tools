@@ -320,7 +320,7 @@ function renderSteps(steps) {
             if (sq) { input.value = sq.ids.join(','); input.dispatchEvent(new Event('change')); }
             pick.value = '';
           };
-          field.append(pick);
+          f.append(pick);
           fillSquadOptions(pick);
         }
         input.value = (step.saved_params && step.saved_params[p.name])
@@ -663,7 +663,9 @@ function drawComparison(cmp) {
   const tied = cmp.tied_count;
   wrap.append(el('div', 'cmp-legend', tied > 1
     ? `${tied} of ${cmp.rows.length} plans finish inside the band. Treat their ordering as a tie and pick on structure — fixture cover, price rises, how much the plan commits you to — rather than on the decimal.`
-    : 'One plan sits clear of the band. That gap is large enough to act on.'));
+    : cmp.rows.length < 2
+      ? 'Only one plan here, so there is nothing to compare. Set num_iterations to 3 in Settings and re-run the archive step to get alternatives.'
+      : 'One plan sits clear of the band. That gap is large enough to act on.'));
 }
 
 /* ------------------------------------------------------------ boot */
