@@ -132,6 +132,9 @@ def prep_data(my_data, options):
     element_to_team = {x["id"]: x["team"] for x in fpl_data["elements"]}  # dict mapping element to team id
     max_players_from_team = Counter([element_to_team[x["element"]] for x in my_data["picks"]]).most_common(1)[0][1] if my_data["picks"] else 3
     data = read_data(options)
+    # Sources disagree on position codes (review uses GKP/DEF/MID/FWD, solio uses G/D/M/F).
+    # Everything downstream expects the single-letter form.
+    data["Pos"] = data["Pos"].replace({"GKP": "G", "GK": "G", "DEF": "D", "MID": "M", "FWD": "F"})
 
     merged_data = pd.merge(elements_team, data, left_on="id_x", right_on="ID")
     merged_data.set_index(["id_x"], inplace=True)
@@ -610,7 +613,7 @@ def solve_multi_period_fpl(data, options):
 
     if options.get("no_future_transfer", None):
         print("OC - No Future Tr")
-        m.addConstr(sum_(transfer_in[p, w] for p in players for w in gws if w > next_gw and w != options.get("use_wc")) == 0)
+        m.addConstr(sum_(transfer_in[p, w] for p in players for w in gws if w > next_gw and w not in options.get("use_wc")) == 0)
 
     if options.get("no_transfer_last_gws", None):
         print("OC - No TR last GWs")
@@ -773,7 +776,7 @@ def solve_multi_period_fpl(data, options):
     if len(options.get("no_chip_gws", [])) > 0:
         print("OC - No Chip GWs")
         no_chip_gws = options["no_chip_gws"]
-        m.addConstr(sum_(use_bb[w] + use_wc[w] + use_fh[w] for w in no_chip_gws) == 0)
+        m.addConstr(sum_(use_bb[w] + use_wc[w] + use_fh[w] + use_tc_gw[w] for w in no_chip_gws) == 0)
 
     if options.get("only_booked_transfers") is True:
         print("OC - Only Booked Transfers")
