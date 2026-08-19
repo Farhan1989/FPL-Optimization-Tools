@@ -382,9 +382,11 @@ tilt scale) are documented constants from FPL scoring composition, *not*
 calibrated to 26/27. `--enrich` (from `solio_enrich.py`) replaces the two
 weakest inferred quantities — team CS probability and per-player DefCon —
 with Solio's published values, but only for the FIRST horizon gameweek and
-only for listed players/teams; later weeks remain prior-based. The parser
-depends on the public page's markdown layout and refuses to write on a thin
-parse rather than emitting garbage. Calibration verified only that sampled means reproduce
+only for listed players/teams; later weeks remain prior-based. The parser now
+reads the typed JSON feed (`latest.json`) rather than markdown tables, so
+layout drift is no longer a failure mode; it still refuses to write on a thin
+parse rather than emitting garbage. Extending enrichment beyond the first
+gameweek needs a multi-GW source — see §7. Calibration verified only that sampled means reproduce
 the blended projection (bias −0.02); the *shape* of the tails is unverified
 until realised outcomes exist.
 
@@ -410,8 +412,18 @@ scenarios). Scoring ignores autosubs (flat lineup totals) and uses buy
 prices. Second-set calendar machinery is a manual process, not code.
 
 **Chips remain out of scope in `cvar_solver.py` and
-`stochastic_solver.py`.** Chip modelling lives in `chip_planner.py` +
-stock solver only.
+`stochastic_solver.py` — and this is a trap, not a footnote.** Both score
+XI + captain (11 players); Bench Boost scores 15. So every CVaR figure
+understates a BB squad by its entire bench, and understates *good* benches
+most — precisely the axis a BB week selects on. `--evaluate --weeks N` also
+holds a squad fixed for N gameweeks, which penalises a squad built as a
+short-lived chip vehicle before a wildcard.
+
+**Do not use a risk-solver squad in a chip week.** In August 2026 the
+stochastic squad benched a backup goalkeeper with zero expected minutes — one
+slot of fifteen dead on the week the chip was spent — while the EV squad,
+which planned the chip, benched a playing keeper. Chip weeks belong to the
+stock solver and `chip_planner.py`.
 
 ---
 
@@ -530,6 +542,22 @@ Notable fixes during review and use:
 - Invariant warnings extended from `gap` alone to all four in §5.
 - Palette moved from aubergine to the brand teal `#1C7480`, preserving every
   lightness value so contrast ratios were unchanged.
+
+### Phase 5 — data plumbing (Aug 2026)
+
+- **`solio_enrich.py` switched to the JSON feed.** Solio publishes an
+  undocumented `api/data/latest.json` alongside `latest.md`, carrying the same
+  figures as typed fields. Two gains: the markdown-layout dependency named in
+  §6 disappears, and the values arrive unrounded — the markdown table quantises
+  clean-sheet probability to integer percent, so `ARS 60%` is really 0.5982.
+  Both parsers were run against the feed and agree to **≤0.0062 on CS and
+  ≤0.0045 on DefCon**, exactly half a quantisation step, confirming they read
+  the same data. The legacy path survives as `--md` with **no silent
+  fallback**, so a JSON break fails loudly instead of quietly downgrading.
+- **`generated` timestamp bug fixed.** The markdown regex expected a `... UTC`
+  suffix while the page emits ISO-8601, so the field had been silently `None`
+  in every `enrich.json` written to date. Cosmetic — nothing consumes it — but
+  it was the §6 fragility demonstrating itself.
 
 ### Measurements worth remembering
 

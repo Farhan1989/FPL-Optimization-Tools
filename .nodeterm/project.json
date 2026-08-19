@@ -1,0 +1,39 @@
+{
+  "version": 1,
+  "rev": 53,
+  "savedAt": "2026-08-19T22:54:29.526Z",
+  "id": "project-17w96gj",
+  "name": "FPL-Optimization-Tools",
+  "color": "#0a84ff",
+  "viewport": {
+    "x": -847.8272721144073,
+    "y": 63.94423063958622,
+    "zoom": 1
+  },
+  "nodes": [
+    {
+      "id": "term-msz726vm-69884f62",
+      "kind": "terminal",
+      "position": {
+        "x": 927.8272721144073,
+        "y": 16.055769360413777
+      },
+      "size": {
+        "width": 1188,
+        "height": 669
+      },
+      "title": "Project and runbook review",
+      "titleAuto": true,
+      "color": "#d97757",
+      "group": null,
+      "tags": [],
+      "collapsed": false,
+      "cwd": ".",
+      "agentId": "claude"
+    }
+  ],
+  "bridges": [],
+  "ropes": [],
+  "agentBrowserControl": true,
+  "agentMessaging": true
+}

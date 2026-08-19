@@ -288,6 +288,7 @@ blank/double calendars by hand and score under each.
 | UI: "Couldn't reach the server" | server down, or a render error | check the terminal; hard-refresh |
 | Plans/Compare empty or single-row | risk solvers write no plan files; `num_iterations` is 1 | expected — set `num_iterations: 3` |
 | Chip `score` finds no plans | `enumerate` has not run | run C1 first |
+| `solio_enrich.py` exits 1 on a JSON error | the JSON feed moved or broke | fall back with `--md` (legacy markdown feed), then say so — the fallback is deliberate and never automatic |
 
 ---
 
