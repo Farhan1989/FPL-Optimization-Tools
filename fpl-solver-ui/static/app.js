@@ -51,6 +51,7 @@ function fillSquadOptions(sel) {
     o.value = sq.key;
     o.textContent = sq.label;
     o.title = sq.note || '';
+    if (sq.stale) o.dataset.stale = '1';
     sel.append(o);
   });
   sel.value = keep;
@@ -307,6 +308,7 @@ function renderSteps(steps) {
       step.params.forEach(p => {
         const f = el('label', 'param' + (p.width === 'wide' ? ' is-wide' : ''));
         f.append(el('span', 'param-label', p.label + (p.required ? ' *' : '')));
+        let warn = null;
         const input = el('input');
         input.type = 'text';
         input.dataset.param = p.name;
@@ -315,9 +317,22 @@ function renderSteps(steps) {
           const pick = document.createElement('select');
           pick.className = 'squad-fill';
           pick.dataset.squadFill = '1';
+          /* A stale fill is the failure this dropdown exists to prevent: the
+             archive is snapshotted before a deadline, so after one passes it
+             holds last gameweek's squad. The option text says so, but the
+             select collapses back to 'Fill from…' the moment it is used, so
+             the warning has to persist next to the value it produced. */
+          warn = el('span', 'squad-warn');
+          warn.hidden = true;
           pick.onchange = () => {
             const sq = squadCache.list.find(s => s.key === pick.value);
-            if (sq) { input.value = sq.ids.join(','); input.dispatchEvent(new Event('change')); }
+            if (sq) {
+              input.value = sq.ids.join(',');
+              input.dispatchEvent(new Event('change'));
+              warn.hidden = !sq.stale;
+              warn.textContent = sq.stale ? `stale fill — ${sq.note || sq.label}` : '';
+              input.classList.toggle('is-stale', !!sq.stale);
+            }
             pick.value = '';
           };
           f.append(pick);
@@ -328,6 +343,7 @@ function renderSteps(steps) {
           ?? p.default ?? '';
         if (p.required) input.required = true;
         f.append(input);
+        if (warn) f.append(warn);
         row.append(f);
       });
       body.append(row);

@@ -246,6 +246,21 @@ def check_blend(  # noqa: PLR0912
 ) -> None:
     mixed_gws = set(gameweeks(mixed))
 
+    # A gameweek the blend carries Pts for but no xMins for is malformed. It is
+    # also the one shape that used to crash this gate: the solo-gameweek filter
+    # below reads `{gw}_xMins_s`, a name that exists ONLY because the column
+    # collides with one in `mixed` during the merge, so a missing xMins column
+    # raised a bare KeyError instead of a diagnosis. FAIL, not WARN: xMins drives
+    # every downstream consumer (minutes sampling in scenario_generator, this
+    # file's own decay and fixture checks, the solver's availability handling),
+    # so there is no degraded mode to warn about — a blend without minutes cannot
+    # be solved on at all.
+    no_xmins = sorted(gw for gw in mixed_gws if f"{gw}_xMins" not in mixed.columns)
+    if no_xmins:
+        cols = ", ".join(f"{gw}_xMins" for gw in no_xmins)
+        rep.fail(f"mixed: {len(no_xmins)} gameweek(s) carry Pts but no xMins ({cols})  -> malformed blend, unusable downstream")
+        mixed_gws -= set(no_xmins)
+
     # 3. gameweeks present in only one source must not be halved
     for name, df in zip(names, dfs, strict=True):
         others: set[int] = set()

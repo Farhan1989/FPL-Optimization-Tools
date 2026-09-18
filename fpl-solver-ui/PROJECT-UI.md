@@ -103,7 +103,15 @@ same: check the artifact, not the description.
 - **No authentication.** The run endpoint executes commands. Bind to localhost
   only.
 - **No results history.** It reads the current contents of `results/`.
-  `archive_solve.py` remains what preserves a week.
+  `archive_solve.py` remains what preserves a week. Run logs under `.runs/` do
+  now carry a `#` provenance header (command, ids, timestamps, exit status), so
+  a finished run can at least be identified after the server stops.
+- **Derived squad entries inherit staleness silently.** *Fill from…* labels the
+  archived squad `STALE` and offers the live one above it (`fpl_live.py`), but
+  `<step> · after this week's move` applies a log's transfers to a base squad —
+  if that solve was itself seeded with a stale squad, the derived entry is stale
+  and unmarked. Fixable now that each log records its `--squad` argv: compare
+  the seed against the live squad. Not done.
 - **Python 3.14 concern (unresolved).** `highspy` and `sasoptpy` may lack wheels
   for 3.14; if the repo environment is on it, that is worth checking
   independently of this UI.

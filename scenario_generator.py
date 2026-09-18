@@ -193,6 +193,14 @@ def decompose(df: pd.DataFrame) -> pd.DataFrame:
     """
     gws = df.attrs["gameweeks"]
     out = df.copy()
+    # Derived columns are accumulated here and attached in ONE pd.concat below.
+    # Assigning them one at a time reallocated the frame on every insert (pandas
+    # PerformanceWarning), and hundreds of lines of warning text buried the
+    # calibration line and the enrichment banner this tool exists to surface.
+    # The VALUES are unchanged: each entry is the identical array/Series the old
+    # code stored, and every in-loop read-back of a just-stored column now reads
+    # the same local object instead of round-tripping through the frame.
+    derived: dict[str, object] = {}
 
     for g in gws:
         xm = out[f"{g}_xMins"].to_numpy(float)
@@ -232,27 +240,28 @@ def decompose(df: pd.DataFrame) -> pd.DataFrame:
         lam_assist = att_ev * ASSIST_FRACTION / ASSIST_PTS
         # conditional-on-playing rates (EVs above are unconditional)
         safe_p = np.maximum(p_play, 1e-6)
-        out[f"{g}_lam_goal"] = lam_goal / safe_p
-        out[f"{g}_lam_assist"] = lam_assist / safe_p
-        out[f"{g}_p_defcon"] = np.clip(dc_ev / DEFCON_PTS / np.maximum(p_60, 1e-6), 0, 0.85)
-        out[f"{g}_saves_ev"] = sv_ev / safe_p
-        out[f"{g}_bonus_ev"] = bn_ev / safe_p
-        out[f"{g}_p_play"] = p_play
-        out[f"{g}_p_60"] = p_60
-        out[f"{g}_app_ev"] = app_ev
+        derived[f"{g}_lam_goal"] = lam_goal / safe_p
+        derived[f"{g}_lam_assist"] = lam_assist / safe_p
+        derived[f"{g}_p_defcon"] = np.clip(dc_ev / DEFCON_PTS / np.maximum(p_60, 1e-6), 0, 0.85)
+        derived[f"{g}_saves_ev"] = sv_ev / safe_p
+        derived[f"{g}_bonus_ev"] = bn_ev / safe_p
+        derived[f"{g}_p_play"] = p_play
+        derived[f"{g}_p_60"] = p_60
+        derived[f"{g}_app_ev"] = app_ev
 
         # team clean-sheet prob: pool defensive players' cs EV
         with np.errstate(invalid="ignore", divide="ignore"):
             cs_prob_player = np.where(cs_pts > 0, cs_ev / cs_pts / np.maximum(p_60, 1e-6), np.nan)
         tmp = pd.DataFrame({"Team": out["Team"], "csp": cs_prob_player, "w": (cs_pts > 0) & (xm >= SIXTY)})
         team_cs = (tmp[tmp.w].groupby("Team").csp.median()).clip(0.02, 0.75)
-        out[f"{g}_team_cs"] = out["Team"].map(team_cs).fillna(0.25)
+        team_cs_col = out["Team"].map(team_cs).fillna(0.25)
+        derived[f"{g}_team_cs"] = team_cs_col
 
         # EV CONSERVATION: pooling forces each player onto the TEAM cs prob.
         # The difference between a player's implied cs EV and the pooled one
         # must flow back into his other components, or premium defenders
         # silently lose EV (and cheap ones gain it).
-        cs_ev_pooled = out[f"{g}_team_cs"].to_numpy(float) * p_60 * cs_pts
+        cs_ev_pooled = team_cs_col.to_numpy(float) * p_60 * cs_pts
         leftover = cs_ev - cs_ev_pooled  # can be +/-
         cs_ev = cs_ev_pooled
         att_ev = np.maximum(att_ev + 0.7 * leftover, 0.0)
@@ -260,7 +269,7 @@ def decompose(df: pd.DataFrame) -> pd.DataFrame:
 
         # conceded-penalty budget (FIX for mean bias): add E[floor(C/2)] back
         # into defensive players' residual and re-split their components
-        lam_c = -np.log(np.clip(out[f"{g}_team_cs"].to_numpy(float), 0.02, 0.98))
+        lam_c = -np.log(np.clip(team_cs_col.to_numpy(float), 0.02, 0.98))
         ks = np.arange(0, 12)
         # E[floor(C/2)] per player from their team's lambda
         pk = np.exp(-lam_c[:, None]) * np.power(lam_c[:, None], ks) / np.array([math.factorial(k) for k in ks])
@@ -274,23 +283,30 @@ def decompose(df: pd.DataFrame) -> pd.DataFrame:
         # recompute stored rates with the corrected components
         lam_goal = att_ev * (1 - ASSIST_FRACTION) / goal_pts
         lam_assist = att_ev * ASSIST_FRACTION / ASSIST_PTS
-        out[f"{g}_lam_goal"] = lam_goal / safe_p
-        out[f"{g}_lam_assist"] = lam_assist / safe_p
-        out[f"{g}_p_defcon"] = np.clip(dc_ev / DEFCON_PTS / np.maximum(p_60, 1e-6), 0, 0.85)
-        out[f"{g}_saves_ev"] = sv_ev / safe_p
-        out[f"{g}_bonus_ev"] = bn_ev / safe_p
+        lam_goal_col = lam_goal / safe_p
+        derived[f"{g}_lam_goal"] = lam_goal_col
+        derived[f"{g}_lam_assist"] = lam_assist / safe_p
+        derived[f"{g}_p_defcon"] = np.clip(dc_ev / DEFCON_PTS / np.maximum(p_60, 1e-6), 0, 0.85)
+        derived[f"{g}_saves_ev"] = sv_ev / safe_p
+        derived[f"{g}_bonus_ev"] = bn_ev / safe_p
         # cs rate needs re-pooling with corrected cs_ev
         with np.errstate(invalid="ignore", divide="ignore"):
             cs_prob_player = np.where(cs_pts > 0, cs_ev / cs_pts / np.maximum(p_60, 1e-6), np.nan)
         tmp = pd.DataFrame({"Team": out["Team"], "csp": cs_prob_player, "w": (cs_pts > 0) & (xm >= SIXTY)})
         team_cs = (tmp[tmp.w].groupby("Team").csp.median()).clip(0.02, 0.75)
-        out[f"{g}_team_cs"] = out["Team"].map(team_cs).fillna(0.25)
+        derived[f"{g}_team_cs"] = out["Team"].map(team_cs).fillna(0.25)
 
         # team goals lambda from FINAL goal rates (post-redistribution)
-        final_lam_goal = out[f"{g}_lam_goal"].to_numpy(float) * safe_p
+        final_lam_goal = lam_goal_col * safe_p
         tg = pd.DataFrame({"Team": out["Team"], "lg": final_lam_goal}).groupby("Team").lg.sum() / (1 - UNLISTED_GOAL_SHARE)
-        out[f"{g}_team_goals"] = out["Team"].map(tg.clip(lower=TEAM_GOAL_FLOOR))
+        derived[f"{g}_team_goals"] = out["Team"].map(tg.clip(lower=TEAM_GOAL_FLOOR))
 
+    if derived:
+        # One allocation instead of ~10 per gameweek. Column order is the
+        # insertion order of `derived`, i.e. exactly the order the one-at-a-time
+        # assignments produced (a re-assigned key keeps its first position).
+        out = pd.concat([out, pd.DataFrame(derived, index=out.index)], axis=1)
+    out.attrs.update(df.attrs)  # concat does not carry attrs across mismatched inputs
     return out
 
 

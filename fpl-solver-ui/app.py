@@ -30,6 +30,7 @@ from fastapi.responses import StreamingResponse, FileResponse, JSONResponse
 from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
+import fpl_live
 import parsers
 
 # ---------------------------------------------------------------- paths
@@ -51,6 +52,10 @@ for d in (DATA_DIR, RESULTS_DIR, LOG_DIR):
 # keeps burning the solver's wall-clock time limit. caffeinate holds the
 # assertion only while the child runs, so nothing leaks past the step.
 KEEP_AWAKE = shutil.which("caffeinate") if sys.platform == "darwin" else None
+
+# Hard ceiling on the live FPL lookup that /api/squads makes on page load.
+# The console must stay usable offline, so this is short and always bounded.
+LIVE_SQUAD_BUDGET = float(os.environ.get("FPL_LIVE_BUDGET", "8"))
 
 ALLOWED_UPLOAD_SUFFIXES = {".csv", ".json"}
 MAX_UPLOAD_BYTES = 64 * 1024 * 1024
@@ -618,9 +623,64 @@ async def run_all() -> Dict[str, Any]:
     return {"steps": [s["id"] for s in steps]}
 
 
+def settings_team_id() -> Optional[int]:
+    """`team_id` from user_settings.json — whose squad the API is asked about."""
+    try:
+        settings = json.loads(SETTINGS_PATH.read_text())
+        return int(settings["team_id"])
+    except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+        return None
+
+
+# A `wait_for` returns, but the worker thread it abandoned keeps blocking —
+# `asyncio.to_thread` cannot be cancelled. Without this, a server that accepts
+# the connection and then drips bytes forever would cost every page load 8s
+# and leak a thread out of the default executor's small pool. One stall buys
+# a cooldown: the archived squad is offered immediately until it expires.
+LIVE_STALL_COOLDOWN = float(os.environ.get("FPL_LIVE_COOLDOWN", "60"))
+_LIVE_STALLED_UNTIL = 0.0
+
+
+def _stall_result(team_id: Optional[int], detail: str) -> Dict[str, Any]:
+    return {"status": "unavailable", "detail": detail, "current_gw": None, "gw": None, "ids": [], "team_id": team_id}
+
+
+async def live_squad_bounded() -> Dict[str, Any]:
+    """The live squad, under a hard wall-clock ceiling.
+
+    Two separate protections, because they fail differently:
+      * `fpl_live` sets per-request connect/read timeouts and its own budget;
+      * this `wait_for` caps the whole thing even if a pathological server
+        drip-feeds bytes forever, which per-socket timeouts never catch.
+
+    It runs in a worker thread so a slow network can never stall the event
+    loop — `/api/squads` is hit on page load, and a blocked loop would freeze
+    the entire console, not just this dropdown."""
+    global _LIVE_STALLED_UNTIL
+    team_id = settings_team_id()
+    if team_id is None:
+        return {"status": "no_team_id", "detail": "no team_id in user_settings.json", "current_gw": None, "gw": None, "ids": []}
+    if time.monotonic() < _LIVE_STALLED_UNTIL:
+        return _stall_result(team_id, "live FPL lookup stalled recently; skipping it for now")
+    try:
+        return await asyncio.wait_for(asyncio.to_thread(fpl_live.live_squad, team_id), LIVE_SQUAD_BUDGET)
+    except asyncio.TimeoutError:
+        _LIVE_STALLED_UNTIL = time.monotonic() + LIVE_STALL_COOLDOWN
+        return _stall_result(team_id, f"live FPL lookup exceeded {LIVE_SQUAD_BUDGET:g}s and was abandoned")
+    except Exception as exc:  # noqa: BLE001 - the archived fallback must survive anything
+        return _stall_result(team_id, f"live FPL lookup failed: {type(exc).__name__}")
+
+
 @app.get("/api/squads")
 async def squads() -> Dict[str, Any]:
-    return {"squads": parsers.discover_squads(LOG_DIR, resolve_archive())}
+    live = await live_squad_bounded()
+    found = parsers.discover_squads(LOG_DIR, resolve_archive(), live=live)
+    return {
+        "squads": found,
+        # Diagnostic sidecar: the dropdown reads `squads` only, but when an
+        # entry says "unverified" this is where you find out why.
+        "live": {k: live.get(k) for k in ("status", "detail", "current_gw", "gw", "elapsed")},
+    }
 
 
 @app.get("/api/plans")

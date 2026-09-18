@@ -477,3 +477,13 @@ main { padding: 28px var(--gut) 80px; min-width: 0; }
 }
 .squad-fill:hover:not(:disabled) { border-color: var(--live); }
 .squad-fill:disabled { color: var(--faint); cursor: default; opacity: .6; }
+
+/* A stale squad fill is a silent wrong answer — the solve succeeds, against
+   last week's team. The option text carries the word STALE; these two make
+   the consequence visible after the select has reset itself. */
+.squad-fill option[data-stale] { color: var(--flag); }
+.param input.is-stale { border-color: var(--flag); }
+.squad-warn {
+  font-family: var(--mono); font-size: 10.5px; line-height: 1.45;
+  color: var(--flag); margin-top: 2px;
+}

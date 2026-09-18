@@ -67,12 +67,28 @@ def combo_name(combo: dict) -> str:
     return "_".join(parts) if parts else "nochip"
 
 
+CANDIDATE_SYNTAX = "expected 'chip:gw' entries separated by commas, e.g. 'bb:1,fh:3,wc:7'"
+
+
 def parse_candidate(text: str) -> dict:
+    """`"bb:1,fh:3"` -> `{"bb": 1, "fh": 3}`, or SystemExit with the reason.
+
+    Malformed syntax used to surface as a raw ValueError traceback while an
+    unknown chip name got a friendly one-liner, so the two halves of the same
+    typo read as two different classes of problem.
+    """
     out = {}
     for part in text.split(","):
-        c, w = part.strip().split(":")
+        part = part.strip()
+        if not part:
+            raise SystemExit(f"empty entry in --candidates {text!r} — {CANDIDATE_SYNTAX}")
+        if part.count(":") != 1:
+            raise SystemExit(f"malformed candidate '{part}' in --candidates — {CANDIDATE_SYNTAX}")
+        c, w = (t.strip() for t in part.split(":"))
         if c not in CHIPS:
             raise SystemExit(f"unknown chip '{c}' in --candidates")
+        if not w.isdigit():
+            raise SystemExit(f"gameweek '{w}' for chip '{c}' in --candidates is not a gameweek number — {CANDIDATE_SYNTAX}")
         out[c] = int(w)
     return out
 
@@ -307,6 +323,14 @@ def cmd_score(args) -> int:
             print(f"  [warn] {log.name}: {len(missing)} names not in scenarios (e.g. {sorted(missing)[:3]})")
         names.append(log.stem)
         totals.append(t - F)
+    if not totals:
+        # every log was skipped above. np.vstack([]) raises "need at least one
+        # array to concatenate", which reads as a bug in the scorer rather than
+        # as a plans directory full of logs it could not parse.
+        raise SystemExit(
+            f"none of the {len(logs)} .log file(s) in {plans_dir} contained a parseable plan — "
+            "these are stock-solver stdout captures; re-run `chip_planner.py enumerate` (runbook §4)"
+        )
     T = np.vstack(totals)  # plans x scenarios (vs field)
     best = T.max(axis=0)
     regret = best[None, :] - T

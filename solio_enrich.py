@@ -89,7 +89,14 @@ ROW_RE = re.compile(r"^\|\s*\d+\s*\|(.+)\|\s*$")
 def team_code(name: str | None) -> str | None:
     """Solio mixes conventions: full names in `team`, 3-letter codes in
     `opponent`. Accept either; return None for anything unrecognised so an
-    unmapped side is dropped rather than silently polluting the team map."""
+    unmapped side is dropped rather than silently polluting the team map.
+
+    BOTH parsers normalise through here. `parse_page` used to call
+    `TEAM_CODE.get()` directly, so the markdown path dropped a Team cell holding
+    a code where the JSON path accepted it — and `--md` exists precisely as the
+    fallback for when the JSON feed breaks (PROJECT.md §8 Phase 5 records the two
+    as cross-validated). A fallback that reads fewer input shapes than the
+    primary path is not one."""
     if not name:
         return None
     if len(name) == 3 and name.isupper():
@@ -138,7 +145,7 @@ def parse_page(text: str) -> dict:
     for c in section_rows(text, "attacking fixtures"):
         if len(c) < 4:
             continue
-        code = TEAM_CODE.get(c[0])
+        code = team_code(c[0])
         fm = fixture_re.search(c[1])
         try:
             gf, ga = float(c[2]), float(c[3])
@@ -155,7 +162,7 @@ def parse_page(text: str) -> dict:
     for c in section_rows(text, "clean sheet odds"):
         if len(c) < 4:
             continue
-        code = TEAM_CODE.get(c[0])
+        code = team_code(c[0])
         if not code:
             continue
         try:

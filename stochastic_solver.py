@@ -51,6 +51,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import sys
 from collections import Counter
 from pathlib import Path
 
@@ -125,6 +126,98 @@ def build_pool(meta, pts, own_ids, current_squad):
         if sum(1 for i in idx if i in keep) < q + 2:
             keep |= set(idx[np.argsort(-proj[idx])][: q + 2])
     return sorted(keep)
+
+
+# -------------------------------------------------------- resolving ID lists
+#
+# Deliberately a copy of the cvar_solver helpers rather than an import: these
+# two tools are standalone by design and neither may depend on the other.
+
+
+class SquadError(ValueError):
+    """A supplied ID list is not usable — refuse to solve on it."""
+
+
+def resolve_ids(meta: pd.DataFrame, spec: str, label: str, dupe_note: str = "") -> list[int]:
+    """
+    Rows in `meta` for a comma-separated FPL ID list, or SquadError.
+
+    The checks that apply to any ID list: integer tokens, no repeats, and every
+    ID naming a player the scenario set actually holds. Returned in meta order,
+    not input order, so nothing downstream can depend on typing order.
+    """
+    raw = [t.strip() for t in spec.split(",") if t.strip()]
+    if not raw:
+        raise SquadError(f"{label}: no IDs supplied")
+    try:
+        ids = [int(t) for t in raw]
+    except ValueError:
+        bad = [t for t in raw if not t.lstrip("+-").isdigit()]
+        raise SquadError(f"{label}: non-integer ID(s) {bad}") from None
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    if dupes:
+        raise SquadError(f"{label}: duplicate ID(s) {dupes}{dupe_note}")
+    row_of = {int(pid): r for r, pid in enumerate(meta.ID.to_numpy())}
+    missing = [i for i in ids if i not in row_of]
+    if missing:
+        raise SquadError(f"{label}: {len(missing)} ID(s) absent from the scenario set: {missing}")
+    return sorted(row_of[i] for i in ids)
+
+
+def resolve_forced(meta: pd.DataFrame, spec: str, label: str = "--force") -> list[int]:
+    """
+    Rows in `meta` for a --force ID list, or SquadError.
+
+    --force has no fixed size and no positional quota, so a size or split check
+    would be inventing a rule. What does apply is that every ID must resolve:
+    the old `meta.ID.isin(...)` path dropped one that did not and solved anyway,
+    silently ignoring the player the user asked to force in.
+    """
+    return resolve_ids(meta, spec, label)
+
+
+def resolve_squad(meta: pd.DataFrame, spec: str, label: str = "--squad") -> list[int]:
+    """
+    Rows in `meta` for the 15 players you currently own, or SquadError.
+
+    This one is not cosmetic. `squad0` becomes `in0` in the stage-1 flow
+    constraint `sq1[p] == in0 + tin1[p] - tout1[p]`, so a silently dropped
+    player has `in0 = 0` and the solver must TRANSFER IN someone already owned
+    to hold them — burning a free transfer or a -4 hit and charging their price
+    against `budget1`. One mistyped ID therefore corrupts the transfer count,
+    the bank and the recommendation, and stage 1 is the move actually executed.
+    Refuse: exactly 15 resolvable IDs in a legal 2/5/5/3 split.
+    """
+    rows = resolve_ids(meta, spec, label, dupe_note=" — a squad cannot own a player twice")
+    if len(rows) != SQUAD_SIZE:
+        raise SquadError(f"{label}: {len(rows)} players supplied, need exactly {SQUAD_SIZE}")
+    pos = meta.Pos.to_numpy()[rows]
+    counts = {q: int((pos == q).sum()) for q in POS_QUOTA}
+    if counts != POS_QUOTA:
+        raise SquadError(f"{label}: illegal split {counts} — FPL requires {POS_QUOTA}")
+    check_club_limit(meta, rows, label)
+    return rows
+
+
+def check_club_limit(meta: pd.DataFrame, rows: list[int], label: str) -> None:
+    """At most CLUB_LIMIT players per club, or SquadError.
+
+    The one FPL rule that is unambiguous for a HELD squad: `sq1` already carries
+    `club1_<t> <= CLUB_LIMIT`, so a stage-0 squad breaking it makes the stage-1
+    model infeasible-by-construction for any move that keeps those four — the
+    solver would report a plan built around dropping one, or fail obscurely.
+
+    There is deliberately NO budget check to go with it. `--squad` is what the
+    user actually owns, and its value at today's prices legitimately exceeds
+    £100.0m once the squad has ridden a few price rises (the £100.0m cap binds on
+    purchase prices, which this model does not carry at all — see PROJECT.md §6:
+    buy prices only, the 50% sell rule unmodelled). Failing on it would reject
+    ordinary mid-season holdings.
+    """
+    team = meta.Team.to_numpy()[rows]
+    over = {str(t): int((team == t).sum()) for t in sorted(set(team)) if (team == t).sum() > CLUB_LIMIT}
+    if over:
+        raise SquadError(f"{label}: {over} — FPL allows at most {CLUB_LIMIT} players per club")
 
 
 # ------------------------------------------------------------------- model
@@ -329,10 +422,10 @@ def main() -> int:
     ap.add_argument("--secs", type=float, default=900)
     ap.add_argument("--gap", type=float, default=0.005)
     ap.add_argument("--preseason", action="store_true")
-    ap.add_argument("--squad", type=str, default=None, help="15 comma-sep FPL IDs")
+    ap.add_argument("--squad", type=str, default=None, help="the 15 FPL IDs you own, comma-sep; must resolve to a legal 2/5/5/3 squad")
     ap.add_argument("--itb", type=float, default=0.0)
     ap.add_argument("--fts", type=int, default=1)
-    ap.add_argument("--force", type=str, default=None)
+    ap.add_argument("--force", type=str, default=None, help="comma-sep FPL IDs to force into the stage-1 squad; every ID must resolve")
     ap.add_argument(
         "--max-recourse-transfers",
         type=int,
@@ -345,12 +438,43 @@ def main() -> int:
     if not args.preseason and not args.squad:
         raise SystemExit("either --preseason or --squad is required")
 
+    # Cheap input checks before anything expensive is loaded or built.
+    # --fts feeds the stage-1 hit constraint `pt1 >= tc1 - fts` directly, so a
+    # number above the cap buys hit-free transfers that FPL would charge -4 for
+    # each: `--fts 9` returns a plan whose transfer count is unexecutable. The
+    # cap is FT_CAP, which is also the ub on the model's own `fts` variables and
+    # matches dev/solver.py's `int_vars(..., lb=0, ub=5)`. Zero is allowed for
+    # the same reason upstream allows it (`initial_ft = max(0, ...)`): it only
+    # makes the plan more conservative, never unexecutable.
+    if not 0 <= args.fts <= FT_CAP:
+        print(
+            f"[2stage] --fts {args.fts} is outside 0..{FT_CAP}: FPL banks at most {FT_CAP} free transfers, "
+            "and the stage-1 hit constraint would hand out the excess free — NOT solving",
+            file=sys.stderr,
+        )
+        return 1
+    if args.itb < 0:
+        print(f"[2stage] --itb {args.itb} is negative: the bank cannot hold less than £0.0m — NOT solving", file=sys.stderr)
+        return 1
+
     meta, gws, pts_all = load_scenarios(args.scenario_dir, args.weeks)
     proj_total = pts_all.mean(axis=0).sum(axis=1)
     field_w = load_field(args.bootstrap, meta, proj_total)
 
-    squad0_full = np.where(meta.ID.isin([int(i) for i in args.squad.split(",")]))[0].tolist() if args.squad else []
+    # Validate both ID lists before anything is built: the model is expensive and
+    # a bad list produces a wrong plan rather than an error (see resolve_squad).
+    try:
+        squad0_full = resolve_squad(meta, args.squad) if args.squad else []
+        forced_rows = resolve_forced(meta, args.force) if args.force else []
+    except SquadError as exc:
+        print(f"[2stage] {exc} — NOT solving", file=sys.stderr)
+        return 1
+
     pool = build_pool(meta, pts_all, field_w, squad0_full)
+    # a forced player outside the pool used to raise a bare ValueError from
+    # pool.index below; the pool is ours to widen, so widen it
+    if forced_rows:
+        pool = sorted(set(pool) | set(forced_rows))
     meta_p = meta.iloc[pool].reset_index(drop=True)
     pts_pool = pts_all[:, pool, :]
     pick = stratified_pick(pts_all, args.use_scenarios)
@@ -364,9 +488,13 @@ def main() -> int:
     d = np.array([args.decay**i for i in range(W)])
     F = np.einsum("snw,n,w->s", pts_all[pick], field_w, d) if args.bootstrap else np.zeros(S)
     squad0 = [pool.index(i) for i in squad0_full]
-    forced = [pool.index(i) for i in np.where(meta.ID.isin([int(x) for x in args.force.split(",")]))[0]] if args.force else None
+    forced = [pool.index(r) for r in forced_rows]
 
     print(f"[2stage] {S}/{pts_all.shape[0]} scenarios (stratified), pool {n}, GWs {gws[0]}-{gws[-1]}, lam={args.lam}")
+    if squad0:
+        print(f"[2stage] holding {len(squad0)} players, {args.fts} FT, {args.itb:.1f} ITB")
+    if forced:
+        print(f"[2stage] forcing in: {', '.join(meta.Name.iloc[r] for r in forced_rows)}")
 
     cfg = {
         "lam": args.lam,

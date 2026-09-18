@@ -321,7 +321,13 @@ blank/double calendars by hand and score under each.
 | `enrichment SKIPPED` in the run summary | the feed rolled to the next GW before your CSVs did | re-download the CSVs so the horizon starts at the feed's gameweek, or re-fetch the feed; `--enrich-strict` turns this into a hard failure |
 | `GW<n> is LOCKED` warning | horizon starts in a gameweek past its deadline | refresh the sources; nothing this run recommends can be executed |
 | `cvar_solver.py` refuses an ID list | not 15 resolvable players, or an illegal 2/5/5/3 split | read the named IDs — a dropped ID used to be scored silently as a partial squad |
-| *Fill from… → Your team* offers `(GW<n-1>)` | the archive snapshot predates the deadline | it is last week's squad; re-archive after the deadline or paste IDs from the FPL site |
+| *Fill from… → Your team* marked `STALE` | the archive snapshot predates the deadline | the entry above it, `· live from FPL`, is your real current squad — use that |
+| *Your team* marked `· unverified` | the FPL API was unreachable | the archived squad is shown unchecked; confirm against the FPL site before solving |
+| `--squad` / `--evaluate` refused | not 15 resolvable players, illegal 2/5/5/3 split, or 4+ from one club | read the named IDs; a dropped ID used to be scored or **solved** silently |
+| `squad value £X exceeds the £100.0m budget` on stderr | normal mid-season — `BV` is today's price, the cap binds on purchase price | informational only; the squad is still scored |
+| `--fts` / `--itb` rejected | outside 0..5, or a negative bank | the FT cap is the model's own `FT_CAP = 5` |
+| `mixed: N gameweek(s) carry Pts but no xMins` | malformed blend | regenerate `mixed.csv`; xMins drives minutes sampling, there is no degraded mode |
+| `none of the N .log file(s) contained a parseable plan` | chip `score` run before `enumerate` | run C1 first (§4) |
 
 ---
 

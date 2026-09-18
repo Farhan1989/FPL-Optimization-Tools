@@ -169,6 +169,12 @@ def build_pool(meta, pts, w_own):
 
 
 def solve_cvar(meta, gws, pts, F, lam, alpha, decay, secs, forced=None):
+    """`forced` is a list of ROW indices into `meta` (i.e. pool positions), already validated.
+
+    It used to be a list of raw FPL IDs looked up here with `np.where(...)` behind an
+    `if len(hits)` guard, so an ID that resolved to nothing simply lost its constraint and
+    the solve carried on as if it had never been asked for. Rows cannot miss.
+    """
     import sasoptpy as so
 
     S, n, W = pts.shape
@@ -215,10 +221,8 @@ def solve_cvar(meta, gws, pts, F, lam, alpha, decay, secs, forced=None):
             m.add_constraint(y[p, w] <= x[p], name=f"y_in_x_{p}_{w}")
             m.add_constraint(c[p, w] <= y[p, w], name=f"c_in_y_{p}_{w}")
     if forced:
-        for pid in forced:
-            hits = np.where(meta.ID.to_numpy() == pid)[0]
-            if len(hits):
-                m.add_constraint(x[int(hits[0])] == 1, name=f"force_{pid}")
+        for p in forced:
+            m.add_constraint(x[int(p)] == 1, name=f"force_{int(meta.ID.iloc[p])}")
 
     # Delta_s as linear expression
     delta = {}
@@ -274,17 +278,18 @@ def describe(tag, delta, alpha):
 
 
 class SquadError(ValueError):
-    """A supplied squad is not a legal 15 — refuse to score it."""
+    """A supplied ID list is not usable — refuse to score or solve on it."""
 
 
-def resolve_squad(meta: pd.DataFrame, spec: str, label: str) -> list[int]:
+def resolve_ids(meta: pd.DataFrame, spec: str, label: str, dupe_note: str = "") -> list[int]:
     """
     Rows in `meta` for a comma-separated FPL ID list, or SquadError.
 
-    --evaluate used to take whatever `meta.ID.isin(ids)` happened to match, so
-    one stale or mistyped ID quietly scored a 13-man squad and printed a
-    plausible number. Refuse instead, the way solio_enrich refuses to write on
-    a thin parse: a confident wrong answer is the worst failure mode here.
+    The checks that apply to any ID list, whatever it is for: integer tokens,
+    no repeats, and every ID naming a player the scenario set actually holds.
+    Returned in meta order, not input order: a squad's score must not depend on
+    the order the IDs were typed (best_legal_xi breaks equal-points ties by list
+    position), and this is what the old isin() path returned.
     """
     raw = [t.strip() for t in spec.split(",") if t.strip()]
     if not raw:
@@ -296,22 +301,64 @@ def resolve_squad(meta: pd.DataFrame, spec: str, label: str) -> list[int]:
         raise SquadError(f"{label}: non-integer ID(s) {bad}") from None
     dupes = sorted({i for i in ids if ids.count(i) > 1})
     if dupes:
-        raise SquadError(f"{label}: duplicate ID(s) {dupes} — a squad cannot own a player twice")
+        raise SquadError(f"{label}: duplicate ID(s) {dupes}{dupe_note}")
     row_of = {int(pid): r for r, pid in enumerate(meta.ID.to_numpy())}
     missing = [i for i in ids if i not in row_of]
     if missing:
         raise SquadError(f"{label}: {len(missing)} ID(s) absent from the scenario set: {missing}")
-    # meta order, not input order: a squad's score must not depend on the
-    # order the IDs were typed (best_legal_xi breaks equal-points ties by list
-    # position), and this is what the old isin() path returned.
-    rows = sorted(row_of[i] for i in ids)
+    return sorted(row_of[i] for i in ids)
+
+
+def resolve_forced(meta: pd.DataFrame, spec: str, label: str = "--force") -> list[int]:
+    """
+    Rows in `meta` for a --force ID list, or SquadError.
+
+    --force is not a squad: any number of players is legal and no positional
+    quota applies, so the size and split checks below would be inventing a rule.
+    What does apply is that every ID must resolve — the old `meta.ID.isin(...)`
+    path dropped one that did not, and `solve_cvar` then skipped the constraint
+    behind an `if len(hits)` guard, so the user got a solve that had quietly
+    ignored the player they asked to force in.
+    """
+    return resolve_ids(meta, spec, label)
+
+
+def resolve_squad(meta: pd.DataFrame, spec: str, label: str) -> list[int]:
+    """
+    Rows in `meta` for a comma-separated 15-man squad, or SquadError.
+
+    --evaluate used to take whatever `meta.ID.isin(ids)` happened to match, so
+    one stale or mistyped ID quietly scored a 13-man squad and printed a
+    plausible number. Refuse instead, the way solio_enrich refuses to write on
+    a thin parse: a confident wrong answer is the worst failure mode here.
+    """
+    rows = resolve_ids(meta, spec, label, dupe_note=" — a squad cannot own a player twice")
     if len(rows) != SQUAD_SIZE:
         raise SquadError(f"{label}: {len(rows)} players supplied, need exactly {SQUAD_SIZE}")
     pos = meta.Pos.to_numpy()[rows]
     counts = {q: int((pos == q).sum()) for q in POS_QUOTA}
     if counts != POS_QUOTA:
         raise SquadError(f"{label}: illegal split {counts} — FPL requires {POS_QUOTA}")
+    check_club_limit(meta, rows, label)
     return rows
+
+
+def check_club_limit(meta: pd.DataFrame, rows: list[int], label: str) -> None:
+    """At most CLUB_LIMIT players per club, or SquadError.
+
+    Unlike the budget, this one is unambiguous at every call site: no price move,
+    no transfer history and no chip makes a 4-from-one-club squad legal, so a list
+    that trips it is a typo or a hypothetical FPL would refuse to accept.
+    """
+    team = meta.Team.to_numpy()[rows]
+    over = {str(t): int((team == t).sum()) for t in sorted(set(team)) if (team == t).sum() > CLUB_LIMIT}
+    if over:
+        raise SquadError(f"{label}: {over} — FPL allows at most {CLUB_LIMIT} players per club")
+
+
+def squad_value(meta: pd.DataFrame, rows: list[int]) -> float:
+    """Total BV of a resolved squad, at the prices the scenario set carries."""
+    return round(float(meta.BV.to_numpy(float)[rows].sum()), 1)
 
 
 def parse_named_squads(spec: str) -> dict[str, str]:
@@ -393,7 +440,7 @@ def main() -> int:
     ap.add_argument("--alpha", type=float, default=0.2, help="tail fraction for CVaR")
     ap.add_argument("--decay", type=float, default=0.87)
     ap.add_argument("--secs", type=float, default=600)
-    ap.add_argument("--force", type=str, default=None, help="comma-sep FPL IDs to force in")
+    ap.add_argument("--force", type=str, default=None, help="comma-sep FPL IDs to force in; every ID must resolve")
     ap.add_argument("--evaluate", type=str, default=None, help="comma-sep 15 FPL IDs: evaluate instead of optimise")
     ap.add_argument(
         "--evaluate-many",
@@ -424,6 +471,24 @@ def main() -> int:
         except SquadError as exc:
             print(f"[cvar] {exc} — NOT evaluating", file=sys.stderr)
             return 1
+        # Budget is a WARNING here where the club limit is a failure, and the
+        # difference is measured, not assumed. `BV` in a scenario set is each
+        # player's price TODAY, while the £100.0m cap binds on what a squad cost
+        # when it was BOUGHT, so a squad carried through price rises is
+        # legitimately over it — on the GW5 set this pipeline's own EV and
+        # stochastic squads value at £100.1m and £101.3m. Nothing in an ID list
+        # distinguishes a mid-season holding from a preseason hypothetical, so
+        # refusing here would reject real squads; report the number instead and
+        # let the user judge. stderr, so the reported metrics stay clean.
+        for nm, rows in squads.items():
+            value = squad_value(meta, rows)
+            if value > BUDGET:
+                print(
+                    f"[cvar] WARN {nm}: squad value £{value:.1f}m exceeds the £{BUDGET:.1f}m budget — "
+                    "expected for a squad held through price rises (BV is today's price), "
+                    "but unbuildable as a preseason or wildcard squad.",
+                    file=sys.stderr,
+                )
         # every squad is scored on the SAME pts array: common random numbers,
         # which is what makes the pairwise differences below meaningful.
         deltas = {nm: evaluate_squad(rows, meta, pts, d, F) for nm, rows in squads.items()}
@@ -441,15 +506,20 @@ def main() -> int:
                     compare_paired(a, deltas[a], b, deltas[b], len(set(squads[a]) & set(squads[b])))
         return 0
 
-    forced = [int(i) for i in args.force.split(",")] if args.force else None
+    try:
+        forced_rows = resolve_forced(meta, args.force) if args.force else []
+    except SquadError as exc:
+        print(f"[cvar] {exc} — NOT solving", file=sys.stderr)
+        return 1
 
     pool = build_pool(meta, pts, w_own)
-    # forced players must be in the pool
-    if forced:
-        pool = sorted(set(pool) | set(np.where(meta.ID.isin(forced))[0]))
+    if forced_rows:
+        pool = sorted(set(pool) | set(forced_rows))  # forced players must be in the pool
+        print(f"[cvar] forcing in: {', '.join(meta.Name.iloc[r] for r in forced_rows)}")
     meta_p = meta.iloc[pool].reset_index(drop=True)
     pts_p = pts[:, pool, :]
     fw_p = field_w[pool]
+    forced = [pool.index(r) for r in forced_rows]
     print(f"[cvar] pool {len(pool)} players ({meta_p.Pos.value_counts().to_dict()})")
 
     results = {}

@@ -593,6 +593,56 @@ Notable fixes during review and use:
   `cvar_evaluate` logs from one session had previously been impossible to tell
   apart, because the squad lives in the argv and not in the output.
 
+- **The same silent-drop bug was in `stochastic_solver.py --squad`, and worse.**
+  Stage-1 output is the move actually executed. A dropped ID leaves `in0 = 0` in
+  `sq1[p] == in0 + tin1[p] - tout1[p]`, so the solver must *transfer in* a player
+  already owned — burning a free transfer and charging the price against
+  `cum <= itb`. Reproduced on the real GW5 squad with one ID corrupted: it exited
+  0 and printed `['Palmer'] -> ['Tavernier', 'Egan']` — **one out, two in**, a
+  physically impossible move, presented as the week's plan. `--force` had the
+  same flaw in both solvers, where an `if len(hits)` guard then dropped the
+  constraint entirely.
+- **FPL legality checks on supplied squads.** More than 3 players from one club
+  now fails in both solvers. Budget deliberately does **not**: `EV_SOLVE`
+  (£100.1m) and `STOCHASTIC` (£101.3m) are squads this pipeline's own solvers
+  produced, because `BV` is today's price while the £100.0m cap binds on purchase
+  price. A hard failure would have rejected two of the three regression canaries,
+  so `cvar` warns on **stderr** (leaving stdout byte-identical) and
+  `stochastic --squad` does not check it at all. `--fts` is bounded by the
+  model's own `FT_CAP = 5`; `--itb` must be non-negative.
+- **The data gate crashed instead of reporting.** `validate_sources.py:260` read
+  `{gw}_xMins_s` — a name that exists only as a pandas merge-collision suffix —
+  so a blend carrying `Pts` without `xMins` raised a bare `KeyError`. It now
+  FAILs with the offending gameweeks named. Fail, not warn: xMins is load-bearing
+  for minutes sampling and there is no degraded mode to warn about.
+- **The `--md` escape hatch read less than the path it backs up.** `parse_page`
+  called `TEAM_CODE.get()` directly, bypassing `team_code()`, so a Team cell
+  holding a 3-letter code was dropped on the markdown path and accepted on the
+  JSON one. With every row coded the fallback refused outright
+  (`teams-with-cs=1`). Both parsers now normalise through `team_code()`.
+- **Test suite: 30 → 223.** All 30 were upstream's. Every custom tool that
+  carries this project's value had none, which is how the `--evaluate` bug
+  survived. `solio_enrich` 56, `chip_planner` 54, `validate_sources` 44,
+  `cvar_solver` 14, `stochastic_solver` 14. No network (an autouse fixture makes
+  `requests` raise), no solver runs, `tmp_path` only.
+- **UI squad fill was structurally a gameweek behind.** `discover_squads` read
+  the newest `picks_gw*.json` inside the archive, which is captured *before* the
+  deadline — so after it passes, the dropdown offered last week's squad, labelled
+  only `(GW04)`. It cost a whole GW5 run, which recommended selling a player
+  already sold. Live lookup now lives in `fpl-solver-ui/fpl_live.py`
+  (`parsers.py` stays pure and offline), staleness is stated in the label, and
+  the lookup is bounded twice over — socket timeouts plus an
+  `asyncio.wait_for` ceiling, because a drip-feeding server defeats the former.
+  Also fixed: `sorted(glob("picks_gw*.json"))[-1]` sorted lexicographically, so
+  `picks_gw9` would have beaten `picks_gw10` from October.
+- **`decompose()` fragmentation.** Derived columns are built in one
+  `pd.concat(axis=1)` instead of ~10 single-column inserts per gameweek.
+  Warnings 10 → 0 (42 → 0 uncapped), output 42 lines → 22. Verified
+  **bit-identical** at raw uint64 across 243 columns × 554 rows on both the
+  applied and skipped enrichment paths — the CSVs use `%.2f`, so byte-identity
+  alone could have masked sub-0.005 drift. No end-to-end speedup: `decompose` is
+  ~0.5% of a run.
+
 ### Measurements worth remembering
 
 | Quantity | Value | Where |

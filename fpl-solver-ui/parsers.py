@@ -546,34 +546,146 @@ def _apply_first_gw_transfers(text: str, base: List[int]) -> List[int]:
     return squad if len(squad) == SQUAD_SIZE else []
 
 
-def discover_squads(logs_dir: Optional[Path], archive_dir: Optional[Path]) -> List[Dict[str, Any]]:
+PICKS_GW_RE = re.compile(r"picks_gw0*(\d+)$", re.IGNORECASE)
+
+
+def _archive_squad(archive_dir: Optional[Path]) -> Optional[Dict[str, Any]]:
+    """Newest `picks_gw*.json` in the snapshot, by gameweek *number*.
+
+    Sorting these by filename puts `picks_gw9` after `picks_gw10`, which would
+    quietly pick the wrong file from GW10 onwards — so parse the number."""
+    if not archive_dir or not archive_dir.is_dir():
+        return None
+    try:
+        candidates = list(archive_dir.glob("picks_gw*.json"))
+    except OSError:
+        return None
+
+    best: Optional[Dict[str, Any]] = None
+    for path in candidates:
+        match = PICKS_GW_RE.match(path.stem)
+        if not match:
+            continue
+        gw = int(match.group(1))
+        if best and gw <= best["gw"]:
+            continue
+        try:
+            data = json.loads(path.read_text())
+            ids = [int(p["element"]) for p in data.get("picks", [])]
+        except (OSError, json.JSONDecodeError, KeyError, TypeError, ValueError):
+            continue
+        if ids:
+            best = {"gw": gw, "ids": ids[:SQUAD_SIZE], "path": path}
+    return best
+
+
+def _squads_for_your_team(archive_dir: Optional[Path], live: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """The "your team" entries, told truthfully.
+
+    The archive snapshot is taken *before* a deadline — correct for solving,
+    but it means that once the deadline passes its newest picks file is last
+    gameweek's squad. Seeding a solve with it produces advice to sell players
+    already sold, and the old `Your team (GW04)` label read as provenance
+    rather than as the warning it actually was.
+
+    So: the live locked squad is offered first when the API gives us one, and
+    an archived squad that predates the live gameweek is labelled STALE in the
+    dropdown text itself. When the API is unreachable the archived squad is
+    still offered — never removed — but is labelled unverified, because we
+    genuinely do not know whether it is current."""
+    live = live or {}
+    live_ids: List[int] = [int(i) for i in (live.get("ids") or [])][:SQUAD_SIZE]
+    live_gw = live.get("gw")
+    current_gw = live.get("current_gw")
+    team_id = live.get("team_id")
+    owner = f"team {team_id}" if team_id else "your team"
+
+    arch = _archive_squad(archive_dir)
+    out: List[Dict[str, Any]] = []
+
+    # Live and archive agree: one entry, and say so — a confirmed squad is
+    # more useful than two identical-looking options.
+    if arch and live_ids and set(live_ids) == set(arch["ids"]):
+        gw = live_gw if live_gw is not None else arch["gw"]
+        return [
+            {
+                "key": "current",
+                "label": f"Your team (GW{gw:02d}) · confirmed live",
+                "ids": live_ids,
+                "note": f"archive snapshot for GW{arch['gw']:02d}, confirmed against the live FPL API as still your squad",
+                "source": "live",
+                "gw": gw,
+                "stale": False,
+            }
+        ]
+
+    if live_ids and live_gw is not None:
+        out.append(
+            {
+                "key": "live",
+                "label": f"Your team (GW{live_gw:02d}) · live from FPL",
+                "ids": live_ids,
+                "note": f"locked GW{live_gw:02d} squad for {owner}, read from the FPL API just now — includes transfers already made",
+                "source": "live",
+                "gw": live_gw,
+                "stale": False,
+            }
+        )
+
+    if not arch:
+        return out
+
+    arch_gw = arch["gw"]
+    stale = current_gw is not None and arch_gw < current_gw
+    if stale:
+        label = f"STALE · archived GW{arch_gw:02d} squad (GW{current_gw:02d} is live)"
+        note = (
+            f"captured before the GW{arch_gw:02d} deadline, so it predates the live GW{current_gw:02d} gameweek. "
+            "Any transfers made since are missing — solving from this can recommend selling a player you no longer own."
+        )
+    elif current_gw is None:
+        label = f"Your team (GW{arch_gw:02d}) · unverified"
+        note = "from the FPL API snapshot in this archive; the live FPL API was unreachable, so whether it is still current is unknown"
+    else:
+        label = f"Your team (GW{arch_gw:02d})"
+        note = f"from the FPL API snapshot in this archive; GW{arch_gw:02d} is the live gameweek"
+
+    out.append(
+        {
+            "key": "current",
+            "label": label,
+            "ids": arch["ids"],
+            "note": note,
+            "source": "archive",
+            "gw": arch_gw,
+            "stale": stale,
+        }
+    )
+    # Freshest first, by gameweek. Live is normally newest, but if a snapshot
+    # were ever taken for a later gameweek than the API reports as live, the
+    # ordering should follow the evidence rather than the source.
+    out.sort(key=lambda e: e.get("gw") or 0, reverse=True)
+    return out
+
+
+def discover_squads(
+    logs_dir: Optional[Path],
+    archive_dir: Optional[Path],
+    live: Optional[Dict[str, Any]] = None,
+) -> List[Dict[str, Any]]:
     """
     Squad ID lists worth offering as one-click fills.
 
     Typing fifteen IDs by hand before every solve is both slow and an easy
     place to make a silent mistake — a wrong ID is a valid solve of the wrong
     problem. Every source here is something an earlier step already produced.
-    """
-    found: List[Dict[str, Any]] = []
 
-    # your actual team, from the API snapshot the archive step takes
-    if archive_dir and archive_dir.is_dir():
-        picks = sorted(archive_dir.glob("picks_gw*.json"))
-        if picks:
-            try:
-                data = json.loads(picks[-1].read_text())
-                ids = [int(p["element"]) for p in data.get("picks", [])]
-                if ids:
-                    found.append(
-                        {
-                            "key": "current",
-                            "label": f"Your team ({picks[-1].stem.replace('picks_', '').upper()})",
-                            "ids": ids[:SQUAD_SIZE],
-                            "note": "from the FPL API snapshot in this archive",
-                        }
-                    )
-            except (OSError, json.JSONDecodeError, KeyError, ValueError):
-                pass
+    `live` is the (optional) result of `fpl_live.live_squad()`. This function
+    does no networking itself: it stays offline, pure and testable, and simply
+    labels what it is handed. `live=None` means "nothing was looked up", which
+    is treated identically to "the lookup failed".
+    """
+    found: List[Dict[str, Any]] = _squads_for_your_team(archive_dir, live)
 
     if logs_dir and logs_dir.is_dir():
         for path in sorted(logs_dir.glob("*.latest.log")):
@@ -586,20 +698,38 @@ def discover_squads(logs_dir: Optional[Path], archive_dir: Optional[Path]) -> Li
             ids = _ids_from_stage1(text)
             if len(ids) == SQUAD_SIZE:
                 found.append(
-                    {"key": f"{step}_stage1", "label": f"{step} · stage-1 squad", "ids": ids, "note": "committed decision under uncertainty"}
+                    {
+                        "key": f"{step}_stage1",
+                        "label": f"{step} · stage-1 squad",
+                        "ids": ids,
+                        "note": "committed decision under uncertainty",
+                        "source": "log",
+                        "stale": False,
+                    }
                 )
                 continue
 
             ids = _ids_from_first_gw_buys(text)
             if len(ids) == SQUAD_SIZE:
                 found.append(
-                    {"key": f"{step}_gw1", "label": f"{step} · EV solve squad", "ids": ids, "note": "first-gameweek squad from the stock solver"}
+                    {
+                        "key": f"{step}_gw1",
+                        "label": f"{step} · EV solve squad",
+                        "ids": ids,
+                        "note": "first-gameweek squad from the stock solver",
+                        "source": "log",
+                        "stale": False,
+                    }
                 )
                 continue
 
-            current = next((f["ids"] for f in found if f["key"] == "current"), [])
-            if current:
-                ids = _apply_first_gw_transfers(text, current)
+            # Apply the solve's own moves to the freshest squad we have. The
+            # live squad is tried first; if the solve was run against the
+            # archived one its Sells won't all be present in the live squad,
+            # `_apply_first_gw_transfers` returns [], and the archived squad
+            # is tried instead.
+            for base in (b for b in (_entry_ids(found, "live"), _entry_ids(found, "current")) if b):
+                ids = _apply_first_gw_transfers(text, base)
                 if ids:
                     found.append(
                         {
@@ -607,6 +737,13 @@ def discover_squads(logs_dir: Optional[Path], archive_dir: Optional[Path]) -> Li
                             "label": f"{step} · after this week's move",
                             "ids": ids,
                             "note": "your team with the first-gameweek transfers applied",
+                            "source": "log",
+                            "stale": False,
                         }
                     )
+                    break
     return found
+
+
+def _entry_ids(found: List[Dict[str, Any]], key: str) -> List[int]:
+    return next((f["ids"] for f in found if f["key"] == key), [])
