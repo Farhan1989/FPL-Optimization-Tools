@@ -136,6 +136,15 @@ def prep_data(my_data, options):
     # Everything downstream expects the single-letter form.
     data["Pos"] = data["Pos"].replace({"GKP": "G", "GK": "G", "DEF": "D", "MID": "M", "FWD": "F"})
 
+    # Owned players the projection source does not cover would be dropped by the merge below,
+    # and the solve would then fail on a missing price. Give them a zero-EV row instead.
+    missing = [int(i["element"]) for i in my_data["picks"] if int(i["element"]) not in set(data["ID"])]
+    if missing:
+        pos_by_type = {t["id"]: t["singular_name_short"][0] for t in fpl_data["element_types"]}
+        pos_by_id = {x["id"]: pos_by_type[x["element_type"]] for x in fpl_data["elements"]}
+        print(f"Squad players missing from projection data, added with zero EV: {missing}")
+        data = pd.concat([data, pd.DataFrame([{**dict.fromkeys(data.columns, 0), "ID": p, "Pos": pos_by_id[p]} for p in missing])], ignore_index=True)
+
     merged_data = pd.merge(elements_team, data, left_on="id_x", right_on="ID")
     merged_data.set_index(["id_x"], inplace=True)
 
@@ -510,55 +519,21 @@ def solve_multi_period_fpl(data, options):
     m.addConstrs([aux[w] <= 1 - use_fh[w - 1] for w in gws if w > next_gw])
     m.addConstrs([use_tc[p, w] <= captain[p, w] for p in players for w in gws])
 
-    wc = options.get("use_wc", [])
-    if len(wc) > 0:
-        m.addConstrs([use_wc[w] == 1 for w in wc])
-        chip_limits["wc"] = len(wc)
+    chip_vars = {"wc": use_wc, "bb": use_bb, "fh": use_fh, "tc": use_tc_gw}
 
-    bb = options.get("use_bb", [])
-    if len(bb) > 0:
-        m.addConstrs([use_bb[w] == 1 for w in bb])
-        chip_limits["bb"] = len(bb)
+    for chip, var in chip_vars.items():
+        forced_use = options.get(f"use_{chip}", [])
+        if forced_use:
+            m.addConstrs([var[w] == 1 for w in forced_use])
+            chip_limits[chip] = len(forced_use)
 
-    fh = options.get("use_fh", [])
-    if len(fh) > 0:
-        m.addConstrs([use_fh[w] == 1 for w in fh])
-        chip_limits["fh"] = len(fh)
+        if allowed_chip_gws.get(chip):
+            m.addConstrs([var[w] == 0 for w in gws if w not in allowed_chip_gws[chip]])
+            chip_limits[chip] = 1
 
-    tc = options.get("use_tc", [])
-    if len(tc) > 0:
-        m.addConstrs([use_tc_gw[w] == 1 for w in tc])
-        chip_limits["tc"] = len(tc)
-
-    if len(allowed_chip_gws.get("wc", [])) > 0:
-        gws_banned = [w for w in gws if w not in allowed_chip_gws["wc"]]
-        m.addConstrs([use_wc[w] == 0 for w in gws_banned])
-        chip_limits["wc"] = 1
-    if len(allowed_chip_gws.get("fh", [])) > 0:
-        gws_banned = [w for w in gws if w not in allowed_chip_gws["fh"]]
-        m.addConstrs([use_fh[w] == 0 for w in gws_banned])
-        chip_limits["fh"] = 1
-    if len(allowed_chip_gws.get("bb", [])) > 0:
-        gws_banned = [w for w in gws if w not in allowed_chip_gws["bb"]]
-        m.addConstrs([use_bb[w] == 0 for w in gws_banned])
-        chip_limits["bb"] = 1
-    if len(allowed_chip_gws.get("tc", [])) > 0:
-        gws_banned = [w for w in gws if w not in allowed_chip_gws["tc"]]
-        m.addConstrs([use_tc_gw[w] == 0 for w in gws_banned])
-        chip_limits["tc"] = 1
-
-    if len(forced_chip_gws.get("wc", [])) > 0:
-        m.addConstr(sum_(use_wc[w] for w in forced_chip_gws["wc"]) == 1)
-        chip_limits["wc"] = 1
-    if len(forced_chip_gws.get("fh", [])) > 0:
-        m.addConstr(sum_(use_fh[w] for w in forced_chip_gws["fh"]) == 1)
-        chip_limits["fh"] = 1
-    if len(forced_chip_gws.get("bb", [])) > 0:
-        m.addConstr(sum_(use_bb[w] for w in forced_chip_gws["bb"]) == 1)
-        chip_limits["bb"] = 1
-    if len(forced_chip_gws.get("tc", [])) > 0:
-        m.addConstr(sum_(use_tc_gw[w] for w in forced_chip_gws["tc"]) == 1)
-        chip_limits["tc"] = 1
+        if forced_chip_gws.get(chip):
+            m.addConstr(sum_(var[w] for w in forced_chip_gws[chip]) == 1)
+            chip_limits[chip] = 1
 
     m.addConstr(sum_(use_wc[w] for w in gws) <= chip_limits.get("wc", 0))
     m.addConstr(sum_(use_bb[w] for w in gws) <= chip_limits.get("bb", 0))
@@ -604,16 +579,20 @@ def solve_multi_period_fpl(data, options):
     if options.get("locked", None):
         print("OC - Locked")
         locked_players = options["locked"]
-        m.addConstrs([squad[p, w] + squad_fh[p, w] == 1 for p in locked_players for w in gws])
+        # On a free hit week the locked player must be in the free hit squad; otherwise in the real squad.
+        m.addConstrs([squad[p, w] >= 1 - use_fh[w] for p in locked_players for w in gws])
+        m.addConstrs([squad_fh[p, w] >= use_fh[w] for p in locked_players for w in gws])
 
     if options.get("locked_next_gw", None):
         print("OC - Locked Next GW")
         locked_in_gw = [(x, gws[0]) if isinstance(x, int) else tuple(x) for x in options["locked_next_gw"]]
-        m.addConstrs([squad[p0, p1] == 1 for (p0, p1) in locked_in_gw])
+        # On a free hit week the locked player must be in the free hit squad; otherwise in the real squad.
+        m.addConstrs([squad[p0, p1] >= 1 - use_fh[p1] for (p0, p1) in locked_in_gw])
+        m.addConstrs([squad_fh[p0, p1] >= use_fh[p1] for (p0, p1) in locked_in_gw])
 
     if options.get("no_future_transfer", None):
         print("OC - No Future Tr")
-        m.addConstr(sum_(transfer_in[p, w] for p in players for w in gws if w > next_gw and w not in options.get("use_wc")) == 0)
+        m.addConstr(sum_(transfer_in[p, w] for p in players for w in gws if w > next_gw and w not in options.get("use_wc", [])) == 0)
 
     if options.get("no_transfer_last_gws", None):
         print("OC - No TR last GWs")
@@ -625,7 +604,7 @@ def solve_multi_period_fpl(data, options):
         print("OC - Num Transfers")
         m.addConstr(sum_(transfer_in[p, next_gw] for p in players) == options["num_transfers"])
 
-    if options.get("hit_limit", None):
+    if options.get("hit_limit", None) is not None:
         print("OC - Hit Limit")
         m.addConstr(sum_(penalized_transfers[w] for w in gws) <= int(options["hit_limit"]))
 
@@ -637,7 +616,7 @@ def solve_multi_period_fpl(data, options):
     #     ft_custom_value = {int(key): value for (key, value) in options.get('ft_custom_value', {}).items()}
     #     ft_gw_value = {**{gw: ft_value for gw in gws}, **ft_custom_value}
 
-    if options.get("future_transfer_limit", None):
+    if options.get("future_transfer_limit", None) is not None:
         print("OC - Future TR Limit")
         m.addConstr(
             sum_(transfer_in[p, w] for p in players for w in gws if w > next_gw and w not in options.get("use_wc", []))
@@ -653,7 +632,7 @@ def solve_multi_period_fpl(data, options):
         print("OC - No TR by position")
         if len(options["no_transfer_by_position"]) > 0:
             m.addConstrs(
-                [transfer_in[p, w] <= use_wc[w] for p in players for w in gws if w > 1 if player_pos[p] in options["no_transfer_by_position"]]
+                [transfer_in[p, w] <= use_wc[w] for p in players for w in gws if w > next_gw if player_pos[p] in options["no_transfer_by_position"]]
             )
 
     max_defs_per_team = options.get("max_defenders_per_team", 3)
