@@ -6,12 +6,12 @@
   },
   "team_data": "id",
   "team_id": 631,
-  "preseason": true,
+  "preseason": false,
   "horizon": 14,
   "no_transfer_last_gws": 2,
   "secs": 900,
   "gap": 0,
-  "num_iterations": 1,
+  "num_iterations": 3,
   "decay_base": 0.87,
   "ft_value_list": {
     "2": 2.5,
@@ -24,15 +24,9 @@
   "keep_top_ev_percent": 5,
   "banned": [],
   "locked": [],
-  "use_wc": [
-    3
-  ],
-  "use_bb": [
-    1
-  ],
-  "use_fh": [
-    8
-  ],
+  "use_wc": [],
+  "use_bb": [],
+  "use_fh": [16],
   "use_tc": [],
   "verbose": true
 }
