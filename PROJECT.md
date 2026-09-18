@@ -445,7 +445,10 @@ stock solver and `chip_planner.py`.
    which shares its in-sample status: **−0.60 E[Δ] for +2.71 CVaR₂₀%**, the
    risk trade working exactly as designed.
 1. **Re-run every `--evaluate` from before the formation fix.** Those numbers
-   were produced with a lineup that could be illegal, and are inflated.
+   were produced with a lineup that could be illegal, and are inflated. They
+   are also suspect for a second reason — see the `--evaluate` validation bug
+   in §8 Phase 6: any run whose ID list contained a typo scored a partial
+   squad and reported a confident number for it.
 2. **Calibrate scenario priors** (~GW6). Compare sampled P(blank), P(haul),
    DefCon hit rates and clean-sheet frequency by position against realised
    outcomes from the archive. Adjust `SHARE` in `scenario_generator.py`.
@@ -558,6 +561,37 @@ Notable fixes during review and use:
   suffix while the page emits ISO-8601, so the field had been silently `None`
   in every `enrich.json` written to date. Cosmetic — nothing consumes it — but
   it was the §6 fragility demonstrating itself.
+
+### Phase 6 — measurement honesty (Sep 2026)
+
+- **`cvar_solver.py --evaluate` scored partial squads silently.** `rows =
+  np.where(meta.ID.isin(ids))[0]` never checked that 15 players resolved, so a
+  single mistyped ID produced a plausible result with no warning — verified:
+  13 valid IDs plus a bogus one returned `E[D]= -2.08`. It now refuses unless
+  exactly 15 IDs resolve into a legal 2/5/5/3 split, naming the offenders.
+  This invalidates any archived `--evaluate` figure whose ID list was not
+  independently checked.
+- **Paired squad comparison, `--evaluate-many`.** Candidate squads share most
+  of their players, so most variance is common and cancels in the per-scenario
+  difference (the field term cancels exactly). Measured paired SE **0.71–0.86
+  against ~1.8 unpaired**, a 2.5× reduction, with the implied delta correlation
+  at **0.851** for squads sharing 13/15 players. It changes conclusions: the
+  held-vs-EV gap of 3.61 reads as a tie inside the ~2.5-point unpaired band but
+  is a **5.1-SE separation** paired. This closes the §1.5 runbook item that had
+  stood as "not yet implemented".
+- **Silent degrades made loud.** Enrichment skipping on a gameweek mismatch and
+  a horizon starting in a locked gameweek both now print banner warnings in
+  `validate_sources.py`'s ok/WARN/FAIL vocabulary, and both are recorded in the
+  scenario `manifest.json` (`enrichment`, `first_gw`). `--enrich-strict` makes
+  the mismatch fatal. The locked-gameweek check is deliberately warning-only:
+  it is network-derived and can be stale, and the `--seed 99` out-of-sample
+  workflow above legitimately regenerates scenarios for a locked gameweek.
+  Generated scenario files are byte-identical to before; the manifest only
+  gained keys.
+- **UI logs record their command.** `.runs/*.log` now carries a `#` header with
+  the full command, run/step ids, timestamps and exit status. Three
+  `cvar_evaluate` logs from one session had previously been impossible to tell
+  apart, because the squad lives in the argv and not in the output.
 
 ### Measurements worth remembering
 

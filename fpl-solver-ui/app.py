@@ -72,10 +72,11 @@ app = FastAPI(title="FPL Solver Console")
 
 
 class Run:
-    def __init__(self, run_id: str, step_id: str, command: str):
+    def __init__(self, run_id: str, step_id: str, command: str, params: Optional[Dict[str, str]] = None):
         self.id = run_id
         self.step_id = step_id
         self.command = command
+        self.params = dict(params or {})
         self.started_at = time.time()
         self.finished_at: Optional[float] = None
         self.returncode: Optional[int] = None
@@ -111,6 +112,72 @@ class Run:
             "duration": (self.finished_at or time.time()) - self.started_at,
             "tail": self.lines[-40:],
         }
+
+
+# ---------------------------------------------------------------- log records
+
+# Run history is in-memory, so everything that made a log reproducible — the
+# command, the squad IDs inside it, when it ran, whether it succeeded — died
+# with the server and left three indistinguishable files of bare numbers.
+# The header puts that back, on disk, above the output.
+#
+# Every header line starts with '#' in column one. parsers.py scans these files
+# line by line for solver shapes that are all either indented ("  ** GW 3:",
+# "  Buy 123 - ...", "  CHIP BB") or begin with a bare keyword ("Solution 2");
+# _ids_from_stage1 matches "^\s*(\d{1,4})\s+\S". A '#' first character matches
+# none of them, so the block is inert to every reader there — and the two
+# `search` patterns (ITB=, Lineup xPts:) are only consulted inside an open
+# Solution block, which the header precedes.
+LOG_COMMENT = "#"
+LOG_RULE = LOG_COMMENT + " " + "-" * 64
+
+
+def _stamp(ts: Optional[float]) -> str:
+    """UTC ISO-8601 to the second. Local time would be ambiguous across the
+    clock change, and these get compared against archive directory names."""
+    if ts is None:
+        return "unknown"
+    return datetime.fromtimestamp(ts, timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def _elapsed(seconds: float) -> str:
+    """Wall clock in the units a solve is actually compared in."""
+    if seconds < 60:
+        return f"{seconds:.1f}s"
+    minutes, secs = divmod(int(round(seconds)), 60)
+    hours, minutes = divmod(minutes, 60)
+    return f"{hours}h {minutes:02d}m {secs:02d}s" if hours else f"{minutes}m {secs:02d}s"
+
+
+def dropped_params(command: str, params: Dict[str, str]) -> List[str]:
+    """Parameters the command line does not record.
+
+    build_argv substitutes values into the template before launch, so a filled
+    param is already in `command` verbatim and repeating it would be noise. A
+    blank optional value is the exception: it deletes its own token and the
+    flag before it, leaving nothing behind to say it was ever asked for. That
+    absence is the only part of the request the command does not carry."""
+    return [name for name, value in (params or {}).items() if not str(value).strip() or str(value) not in command]
+
+
+def log_header(run: Run) -> str:
+    """Provenance block written above the captured output, on disk only."""
+    rows = [
+        ("step", run.step_id),
+        ("run", run.id),
+        ("command", run.command),
+        ("started", _stamp(run.started_at)),
+        ("finished", _stamp(run.finished_at)),
+        ("elapsed", _elapsed((run.finished_at or time.time()) - run.started_at)),
+        ("status", f"{run.status()} (exit {run.returncode if run.returncode is not None else 'n/a'})"),
+    ]
+    missing = dropped_params(run.command, run.params)
+    if missing:
+        rows.append(("blank params", ", ".join(sorted(missing)) + "  (left empty — their flags were dropped above)"))
+    lines = [LOG_RULE, f"{LOG_COMMENT} FPL Solver Console run record"]
+    lines += [f"{LOG_COMMENT} {label:<13}{value}" for label, value in rows]
+    lines.append(LOG_RULE)
+    return "\n".join(lines) + "\n"
 
 
 RUNS: Dict[str, Run] = {}
@@ -200,7 +267,7 @@ async def launch(step: Dict[str, Any], params: Optional[Dict[str, str]] = None) 
         # -i no idle sleep, -s no system sleep on AC. caffeinate becomes the
         # group leader, so cancelling still signals the whole tree.
         argv = [KEEP_AWAKE, "-is", *argv]
-    run = Run(uuid.uuid4().hex[:12], step["id"], command)
+    run = Run(uuid.uuid4().hex[:12], step["id"], command, params)
     RUNS[run.id] = run
     LAST_RUN_BY_STEP[step["id"]] = run.id
 
@@ -225,6 +292,10 @@ async def launch(step: Dict[str, Any], params: Optional[Dict[str, str]] = None) 
         run.returncode = 127
         run.finished_at = time.time()
         run.emit("line", f"Command not found: {exc}")
+        # A launch that never started used to leave no trace at all. Record it
+        # under its own id — but not as <step>.latest.log, which the Plans
+        # panel reads: a typo in one flag must not wipe the last good plan.
+        (LOG_DIR / f"{run.id}.log").write_text(log_header(run) + "\n".join(run.lines) + "\n")
         run.emit("end", "failed")
         return run
 
@@ -236,11 +307,13 @@ async def launch(step: Dict[str, Any], params: Optional[Dict[str, str]] = None) 
             run.emit("line", raw.decode("utf-8", "replace").rstrip("\n"))
         run.returncode = await proc.wait()
         run.finished_at = time.time()
-        body = "\n".join(run.lines)
-        (LOG_DIR / f"{run.id}.log").write_text(body)
+        # run.lines stays the pure captured output — it is what the browser is
+        # already streaming. The header is added on the way to disk only.
+        record = log_header(run) + "\n".join(run.lines) + "\n"
+        (LOG_DIR / f"{run.id}.log").write_text(record)
         # Stable per-step copy: the Plans panel reads these, so a rerun
         # replaces its own plan rather than accumulating stale variants.
-        (LOG_DIR / f"{run.step_id}.latest.log").write_text(body)
+        (LOG_DIR / f"{run.step_id}.latest.log").write_text(record)
         run.emit("end", run.status())
 
     asyncio.create_task(pump())

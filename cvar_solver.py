@@ -40,6 +40,11 @@ Usage
     # evaluate a fixed squad instead of optimising:
     uv run python cvar_solver.py ... --evaluate 411,426,368,...
 
+    # score several named squads on the SAME scenarios and compare them
+    # pairwise ('name=ids', squads separated by ';'):
+    uv run python cvar_solver.py ... \
+        --evaluate-many "held=109,8,469,...;ev=109,8,31,...;stoch=109,8,31,..."
+
 Outputs the chosen squad, its E[Delta], CVaR, P(beat field), and the same
 metrics for lambda=0 for comparison.
 """
@@ -49,6 +54,7 @@ from __future__ import annotations
 import argparse
 import glob
 import json
+import sys
 from pathlib import Path
 
 import numpy as np
@@ -65,6 +71,7 @@ CAPTAIN_POOL = 12  # top players by own*proj considered field captains
 POOL_TOP_EV = 130  # pool: top by projected total
 POOL_TOP_VALUE = 60  # plus top by projection per price
 POOL_MIN_OWN = 8.0  # plus everyone above this ownership (field cover)
+UNPAIRED_NOISE_BAND = 2.5  # documented habit: unpaired E[D] gaps under this are called a tie
 
 
 # ------------------------------------------------------------------ loading
@@ -266,6 +273,116 @@ def describe(tag, delta, alpha):
     return {"mean": float(delta.mean()), "sd": float(delta.std()), "cvar": float(tail.mean()), "p_beat": float(np.mean(delta > 0))}
 
 
+class SquadError(ValueError):
+    """A supplied squad is not a legal 15 — refuse to score it."""
+
+
+def resolve_squad(meta: pd.DataFrame, spec: str, label: str) -> list[int]:
+    """
+    Rows in `meta` for a comma-separated FPL ID list, or SquadError.
+
+    --evaluate used to take whatever `meta.ID.isin(ids)` happened to match, so
+    one stale or mistyped ID quietly scored a 13-man squad and printed a
+    plausible number. Refuse instead, the way solio_enrich refuses to write on
+    a thin parse: a confident wrong answer is the worst failure mode here.
+    """
+    raw = [t.strip() for t in spec.split(",") if t.strip()]
+    if not raw:
+        raise SquadError(f"{label}: no IDs supplied")
+    try:
+        ids = [int(t) for t in raw]
+    except ValueError:
+        bad = [t for t in raw if not t.lstrip("+-").isdigit()]
+        raise SquadError(f"{label}: non-integer ID(s) {bad}") from None
+    dupes = sorted({i for i in ids if ids.count(i) > 1})
+    if dupes:
+        raise SquadError(f"{label}: duplicate ID(s) {dupes} — a squad cannot own a player twice")
+    row_of = {int(pid): r for r, pid in enumerate(meta.ID.to_numpy())}
+    missing = [i for i in ids if i not in row_of]
+    if missing:
+        raise SquadError(f"{label}: {len(missing)} ID(s) absent from the scenario set: {missing}")
+    # meta order, not input order: a squad's score must not depend on the
+    # order the IDs were typed (best_legal_xi breaks equal-points ties by list
+    # position), and this is what the old isin() path returned.
+    rows = sorted(row_of[i] for i in ids)
+    if len(rows) != SQUAD_SIZE:
+        raise SquadError(f"{label}: {len(rows)} players supplied, need exactly {SQUAD_SIZE}")
+    pos = meta.Pos.to_numpy()[rows]
+    counts = {q: int((pos == q).sum()) for q in POS_QUOTA}
+    if counts != POS_QUOTA:
+        raise SquadError(f"{label}: illegal split {counts} — FPL requires {POS_QUOTA}")
+    return rows
+
+
+def parse_named_squads(spec: str) -> dict[str, str]:
+    """`name=id,id,...;name=...` -> {name: id-list}. ';' separates squads, '=' names one."""
+    out: dict[str, str] = {}
+    for chunk in spec.split(";"):
+        chunk = chunk.strip()
+        if not chunk:
+            continue
+        if "=" not in chunk:
+            raise SquadError(f"squad {chunk!r} is not name=ids (use 'held=1,2,...;ev=3,4,...')")
+        name, ids = chunk.split("=", 1)
+        name = name.strip()
+        if not name:
+            raise SquadError(f"squad {chunk!r} has an empty name")
+        if name in out:
+            raise SquadError(f"duplicate squad name {name!r}")
+        out[name] = ids
+    if len(out) < 2:
+        raise SquadError(f"--evaluate-many wants at least two squads, got {len(out)}")
+    return out
+
+
+def evaluate_squad(rows: list[int], meta: pd.DataFrame, pts: np.ndarray, d: np.ndarray, F: np.ndarray) -> np.ndarray:
+    """Delta per scenario for a fixed 15: best legal XI and captain chosen on MEAN points."""
+    mean_pts = pts.mean(axis=0)
+    lineup, caps = {}, {}
+    for w in range(pts.shape[2]):
+        lineup[w] = best_legal_xi(rows, meta, mean_pts[:, w])
+        caps[w] = max(lineup[w], key=lambda p: mean_pts[p, w])
+    return portfolio_delta(pts, d, F, lineup, caps)
+
+
+def compare_paired(name_a: str, delta_a: np.ndarray, name_b: str, delta_b: np.ndarray, shared: int) -> dict:
+    """
+    Per-scenario difference of two squads scored on the SAME scenarios.
+
+    The field term F cancels exactly in delta_a - delta_b, and so does every
+    shared player's contribution week by week, so the only variance left is
+    the slots that actually disagree. That is why the paired SE comes out a
+    fraction of the ~1.3 each mean carries on its own, and why two squads that
+    are individually inside the noise band can still be told apart.
+    """
+    diff = delta_a - delta_b
+    S = len(diff)
+    mean = float(diff.mean())
+    se = float(diff.std(ddof=1) / np.sqrt(S))
+    unpaired = float(np.sqrt(delta_a.var(ddof=1) + delta_b.var(ddof=1)) / np.sqrt(S))
+    p_ab = float(np.mean(diff > 0))
+    print(
+        f"  {name_a} - {name_b}: mean={mean:+7.2f}  pairedSE={se:5.2f}  (unpaired SE {unpaired:5.2f})  "
+        f"P({name_a}>{name_b})={p_ab:.2f}  shared {shared}/{SQUAD_SIZE}"
+    )
+    lead, trail = (name_a, name_b) if mean >= 0 else (name_b, name_a)
+    t = abs(mean) / se if se > 0 else np.inf
+    if t < 2:
+        print(
+            f"    VERDICT: inside noise — {abs(mean):.2f} is under 2 paired SE ({2 * se:.2f}); "
+            f"'{name_a}' and '{name_b}' are not separable even paired. Decide on team news."
+        )
+    elif abs(mean) < UNPAIRED_NOISE_BAND:
+        print(
+            f"    VERDICT: '{lead}' ahead by {abs(mean):.2f} +/- {2 * se:.2f} (2 paired SE, {t:.1f} SE). "
+            f"Unpaired this gap sits inside the {UNPAIRED_NOISE_BAND:.1f}pt band and would be called a tie; "
+            f"the pairing resolves it — on these scenarios, real but small."
+        )
+    else:
+        print(f"    VERDICT: '{lead}' separates from '{trail}' by {abs(mean):.2f} ({t:.1f} paired SE).")
+    return {"mean": mean, "paired_se": se, "unpaired_se": unpaired, "p_a_beats_b": p_ab, "shared": shared}
+
+
 def main() -> int:
     ap = argparse.ArgumentParser(description="CVaR squad optimiser over scenarios.")
     ap.add_argument("--scenario-dir", type=Path, required=True)
@@ -278,6 +395,12 @@ def main() -> int:
     ap.add_argument("--secs", type=float, default=600)
     ap.add_argument("--force", type=str, default=None, help="comma-sep FPL IDs to force in")
     ap.add_argument("--evaluate", type=str, default=None, help="comma-sep 15 FPL IDs: evaluate instead of optimise")
+    ap.add_argument(
+        "--evaluate-many",
+        type=str,
+        default=None,
+        help="'name=ids;name=ids;...': score several squads on the same scenarios and compare them pairwise",
+    )
     ap.add_argument("--compare-ev", action="store_true", help="also solve lam=0 and report both")
     args = ap.parse_args()
 
@@ -290,17 +413,32 @@ def main() -> int:
     print(f"[cvar] {S} scenarios, {len(meta)} players, GWs {gws[0]}-{gws[-1]}, field EO sum={field_w.sum() * 100:.0f}%")
     print(f"[cvar] field decayed score: mean {F.mean():.1f}, sd {F.std():.1f}")
 
-    if args.evaluate:
-        ids = [int(i) for i in args.evaluate.split(",")]
-        rows = np.where(meta.ID.isin(ids))[0].tolist()
-        mean_pts = pts.mean(axis=0)
-        lineup, caps = {}, {}
-        for w in range(len(gws)):
-            lineup[w] = best_legal_xi(rows, meta, mean_pts[:, w])
-            caps[w] = max(lineup[w], key=lambda p: mean_pts[p, w])
-        delta = portfolio_delta(pts, d, F, lineup, caps)
-        print("\n[cvar] evaluation of supplied squad:")
-        describe("supplied", delta, args.alpha)
+    if args.evaluate and args.evaluate_many:
+        print("[cvar] pass one of --evaluate / --evaluate-many, not both — NOT evaluating", file=sys.stderr)
+        return 1
+
+    if args.evaluate or args.evaluate_many:
+        try:
+            specs = {"supplied": args.evaluate} if args.evaluate else parse_named_squads(args.evaluate_many)
+            squads = {nm: resolve_squad(meta, s, nm) for nm, s in specs.items()}
+        except SquadError as exc:
+            print(f"[cvar] {exc} — NOT evaluating", file=sys.stderr)
+            return 1
+        # every squad is scored on the SAME pts array: common random numbers,
+        # which is what makes the pairwise differences below meaningful.
+        deltas = {nm: evaluate_squad(rows, meta, pts, d, F) for nm, rows in squads.items()}
+        if args.evaluate:
+            print("\n[cvar] evaluation of supplied squad:")
+        else:
+            print(f"\n[cvar] evaluation of {len(squads)} squads on the same {S} scenarios:")
+        for nm, delta in deltas.items():
+            describe(nm, delta, args.alpha)
+        if len(deltas) > 1:
+            print("\n[cvar] paired comparison (common random numbers; field term cancels in the difference):")
+            names = list(deltas)
+            for i, a in enumerate(names):
+                for b in names[i + 1 :]:
+                    compare_paired(a, deltas[a], b, deltas[b], len(set(squads[a]) & set(squads[b])))
         return 0
 
     forced = [int(i) for i in args.force.split(",")] if args.force else None

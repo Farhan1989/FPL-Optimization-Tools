@@ -121,6 +121,21 @@ Check the printed calibration line: **bias should be within ±0.05.** If not,
 something upstream changed and the scenarios are no longer a mean-preserving
 spread of your projections.
 
+**Read the closing `run summary` block.** It states whether enrichment was
+APPLIED or SKIPPED and whether the first horizon gameweek is still open.
+Enrichment silently no-ops when the feed has rolled to the next gameweek
+before your CSVs have — the scenarios still generate, but GW1 of the horizon
+falls back to inferred CS/DefCon priors (§6). Add `--enrich-strict` to make
+that a hard failure instead:
+
+```bash
+uv run python scenario_generator.py ... --enrich data/enrich.json --enrich-strict
+```
+
+A `GW<n> is LOCKED` warning means the horizon starts in a gameweek whose
+deadline has passed, so nothing it recommends can be executed. Refresh the
+sources so the horizon starts at the next actionable gameweek.
+
 The `rm -rf` matters on the CLI. Regenerating with a *smaller* `--scenarios`
 leaves higher-numbered files from the previous run in place, and every
 downstream tool globs the whole directory. The UI does this for you.
@@ -163,10 +178,24 @@ You get `E[Δ]`, `sd`, `CVaR₂₀%` and `P(Δ>0)`. The EV move maximises
 expectation; the stochastic move protects the tail. Disagreement tells you how
 assumption-sensitive the week is — information, not error.
 
-**Read these with the standard error in mind.** With sd ≈ 18 over 200
-scenarios the SE on each mean is ≈ 1.3, so a difference under ~2.5 points is
-not distinguishable. The squads also share most of their players, so a paired
-comparison would be sharper — not yet implemented.
+**Prefer `--evaluate-many` — it scores every squad on the same scenarios
+and reports the PAIRED difference:**
+
+```bash
+uv run python cvar_solver.py --scenario-dir scenarios/ \
+    --bootstrap <ARCHIVE>/bootstrap_slim.json --weeks 4 \
+    --evaluate-many "held=<15 ids>;ev=<15 ids>;stoch=<15 ids>"
+```
+
+Candidate squads share most of their players, so most of the variance is
+common and cancels in the difference. Measured on GW5: paired SE **0.71–0.86**
+against ~1.8 unpaired — a 2.5× variance reduction that changes conclusions.
+A 3.61-point gap read as "inside the ~2.5-point band, call it a tie" unpaired;
+paired it is a 5.1-SE separation. Read the `VERDICT:` line.
+
+Single `--evaluate` still works for one squad, and both now **refuse** an ID
+list that is not exactly 15 resolvable players in a legal 2/5/5/3 split —
+previously a typo'd ID was silently dropped and the partial squad scored.
 
 ### 1.6 Optional: a tail-optimised alternative
 
@@ -289,6 +318,10 @@ blank/double calendars by hand and score under each.
 | Plans/Compare empty or single-row | risk solvers write no plan files; `num_iterations` is 1 | expected — set `num_iterations: 3` |
 | Chip `score` finds no plans | `enumerate` has not run | run C1 first |
 | `solio_enrich.py` exits 1 on a JSON error | the JSON feed moved or broke | fall back with `--md` (legacy markdown feed), then say so — the fallback is deliberate and never automatic |
+| `enrichment SKIPPED` in the run summary | the feed rolled to the next GW before your CSVs did | re-download the CSVs so the horizon starts at the feed's gameweek, or re-fetch the feed; `--enrich-strict` turns this into a hard failure |
+| `GW<n> is LOCKED` warning | horizon starts in a gameweek past its deadline | refresh the sources; nothing this run recommends can be executed |
+| `cvar_solver.py` refuses an ID list | not 15 resolvable players, or an illegal 2/5/5/3 split | read the named IDs — a dropped ID used to be scored silently as a partial squad |
+| *Fill from… → Your team* offers `(GW<n-1>)` | the archive snapshot predates the deadline | it is last week's squad; re-archive after the deadline or paste IDs from the FPL site |
 
 ---
 

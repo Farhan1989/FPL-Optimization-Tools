@@ -34,7 +34,13 @@ realised 26/27 data accumulates.
 Usage
 -----
     python scenario_generator.py --sources review solio --data-dir data \
-        --scenarios 200 --out scenarios/ [--seed 42] [--horizon 12]
+        --scenarios 200 --out scenarios/ [--seed 42] [--horizon 12] \
+        [--enrich data/enrich.json] [--enrich-strict]
+
+`--enrich-strict` refuses to write anything when the enrichment file is for a
+different gameweek, rather than degrading to inferred priors. The first
+horizon gameweek is also checked against the FPL calendar: a horizon that
+opens on a locked gameweek WARNS (never fails) and skips silently offline.
 
 Outputs
 -------
@@ -50,6 +56,9 @@ from __future__ import annotations
 import argparse
 import json
 import math
+import sys
+import threading
+from datetime import UTC, datetime
 from pathlib import Path
 
 import numpy as np
@@ -88,6 +97,51 @@ SIXTY_PLUS_KNEE = 62.0  # xMins above this => starter plays 60+ if starts
 
 def canon_pos(p: str) -> str:
     return POS_ALIASES.get(str(p), str(p))
+
+
+# ----------------------------------------------------------------- reporting
+
+BANNER = "=" * 60
+FPL_BOOTSTRAP_URL = "https://fantasy.premierleague.com/api/bootstrap-static/"
+GW_LOCK_TIMEOUT = 6.0  # seconds — a calendar check must never stall a generate
+
+
+def notice(level: str, lines: list[str], *, err: bool = False) -> None:
+    """
+    ok / WARN / FAIL vocabulary borrowed from validate_sources.py, in the
+    `[scen]` voice. Banner-wrapped because the one-line version of these
+    messages scrolled past unread among hundreds of lines of solver output.
+    """
+    stream = sys.stderr if err else sys.stdout
+    if err:
+        sys.stdout.flush()  # the UI captures both through pipes; keep the order readable
+    pad = " " * len(level)
+    print(f"[scen] {BANNER}", file=stream)
+    for i, ln in enumerate(lines):
+        print(f"[scen]   {level if i == 0 else pad}  {ln}", file=stream)
+    print(f"[scen] {BANNER}", file=stream)
+
+
+def run_summary(enrich: dict, lock: dict) -> None:
+    """
+    Last thing a run prints. A reader who sees only the tail must be able to
+    tell an enriched scenario set from one that quietly fell back to priors.
+    """
+    state = enrich["state"]
+    if state == "APPLIED":
+        line = (
+            f"APPLIED to GW{enrich['horizon_gw']} — {enrich['players_cs']} players' team CS "
+            f"({enrich['teams']} teams), {enrich['defcon']} DefCon from published data"
+        )
+    elif state == "SKIPPED":
+        line = f"SKIPPED — {enrich['detail']}; GW{enrich['horizon_gw']} CS/DefCon are INFERRED priors"
+    else:
+        line = "NOT REQUESTED (no --enrich) — all clean-sheet and DefCon values are inferred priors"
+    print(f"[scen] {BANNER}")
+    print("[scen]   run summary")
+    print(f"[scen]     enrichment  {line}")
+    print(f"[scen]     horizon     {lock['summary']}")
+    print(f"[scen] {BANNER}")
 
 
 # ------------------------------------------------------------------- loading
@@ -240,7 +294,7 @@ def decompose(df: pd.DataFrame) -> pd.DataFrame:
     return out
 
 
-def apply_enrichment(dec: pd.DataFrame, enrich_path: Path) -> pd.DataFrame:
+def apply_enrichment(dec: pd.DataFrame, enrich_path: Path, *, strict: bool = False) -> tuple[pd.DataFrame, dict]:
     """
     Override the first horizon gameweek's inferred team clean-sheet
     probability and per-player DefCon probability with Solio's PUBLISHED
@@ -248,13 +302,30 @@ def apply_enrichment(dec: pd.DataFrame, enrich_path: Path) -> pd.DataFrame:
     in cs/defcon expectation flows into the assist rate (mean-linear), so
     the blend's calibrated means are untouched — only the decomposition,
     and therefore the correlation/tail structure, improves.
+
+    Returns (frame, status). status["state"] is APPLIED or SKIPPED and is
+    reported again in the run summary, so a degraded set cannot be mistaken
+    for an enriched one days later when the log is read back.
     """
     e = json.loads(Path(enrich_path).read_text())
     gws = dec.attrs["gameweeks"]
     g = gws[0]
-    if e.get("gameweek") not in (None, g):
-        print(f"[scen] enrich is for GW{e['gameweek']}, horizon starts GW{g} — skipping enrichment")
-        return dec
+    e_gw = e.get("gameweek")
+    if e_gw not in (None, g):
+        # The Solio feed rolls forward the moment a deadline passes, so a
+        # horizon still starting at the old GW loses exactly the two
+        # quantities §6 calls the generator's weakest inferred links.
+        detail = f"enrich.json is for GW{e_gw}, horizon starts GW{g}"
+        falls = "would fall back to" if strict else "falls back to"
+        lines = [
+            f"enrichment {'REFUSED' if strict else 'SKIPPED'} — {detail}",
+            f"GW{g} {falls} INFERRED clean-sheet and DefCon priors",
+            "(PROJECT.md §6: the generator's two weakest inferred quantities)",
+            "re-fetch the feed: uv run python solio_enrich.py --out data/enrich.json",
+            "NOT writing scenarios (--enrich-strict)" if strict else "pass --enrich-strict to make this a hard failure",
+        ]
+        notice("FAIL" if strict else "WARN", lines, err=strict)
+        return dec, {"state": "SKIPPED", "detail": detail, "horizon_gw": g, "enrich_gw": e_gw}
     pos = dec["Pos"].to_numpy()
     cs_pts = np.vectorize(CS_PTS.get)(pos).astype(float)
     p60 = dec[f"{g}_p_60"].to_numpy(float)
@@ -285,7 +356,71 @@ def apply_enrichment(dec: pd.DataFrame, enrich_path: Path) -> pd.DataFrame:
         f"team CS overridden ({len(cs_map)} teams), "
         f"{int(dc_have.sum())} DefCon probabilities set from published data"
     )
-    return dec
+    status = {
+        "state": "APPLIED",
+        "horizon_gw": g,
+        "teams": len(cs_map),
+        "players_cs": int(have.sum()),
+        "defcon": int(dc_have.sum()),
+    }
+    return dec, status
+
+
+def check_first_gw_open(first_gw: int, timeout: float = GW_LOCK_TIMEOUT) -> dict:
+    """
+    Warn — never fail — when the horizon opens on a gameweek whose deadline
+    has already passed: that week is live or finished, so every transfer,
+    lineup and captain recommendation derived from these scenarios is
+    unexecutable. Any network or parse trouble degrades to UNKNOWN; building
+    scenarios offline has to keep working.
+    """
+    try:
+        from utils import cached_request
+
+        # Reuse the repo's cached helper (a warm cache answers offline), but
+        # it takes no timeout and requests blocks on a dead host for over a
+        # minute — so run it in a daemon thread we can simply walk away from.
+        got: dict = {}
+
+        def fetch() -> None:
+            try:
+                got["data"] = cached_request(FPL_BOOTSTRAP_URL)
+            except Exception as exc:
+                got["error"] = exc
+
+        worker = threading.Thread(target=fetch, daemon=True)
+        worker.start()
+        worker.join(timeout)
+        if "data" not in got:
+            raise got.get("error") or TimeoutError(f"no response in {timeout:.0f}s")
+        events = got["data"]["events"]
+        deadlines = {int(ev["id"]): datetime.fromisoformat(str(ev["deadline_time"]).replace("Z", "+00:00")) for ev in events}
+    except Exception as exc:  # offline must stay usable: one brief note, no stack
+        print(f"[scen] deadline check skipped — FPL API unavailable ({type(exc).__name__})")
+        return {"state": "UNKNOWN", "summary": f"GW{first_gw} deadline not checked (FPL API unavailable)"}
+
+    if first_gw not in deadlines:
+        print(f"[scen] deadline check skipped — GW{first_gw} is not in the FPL event list")
+        return {"state": "UNKNOWN", "summary": f"GW{first_gw} deadline not checked (not in the FPL event list)"}
+
+    now = datetime.now(UTC)
+    stamp = deadlines[first_gw].strftime("%Y-%m-%d %H:%M UTC")
+    if deadlines[first_gw] > now:
+        return {"state": "OPEN", "summary": f"GW{first_gw} is still open — deadline {stamp}"}
+
+    nxt = min((gw for gw, dl in deadlines.items() if dl > now), default=None)
+    nxt_txt = f"next actionable gameweek is GW{nxt}" if nxt else "no gameweek in the FPL calendar is still open"
+    notice(
+        "WARN",
+        [
+            f"horizon starts at GW{first_gw}, which can no longer be acted on",
+            f"its deadline ({stamp}) has passed — GW{first_gw} is live or finished",
+            f"{nxt_txt}; refresh the sources so the horizon starts there",
+            "otherwise every transfer, lineup and captain call from this set",
+            "is unexecutable (the scenarios themselves are still written)",
+        ],
+    )
+    return {"state": "LOCKED", "summary": f"GW{first_gw} is LOCKED — deadline {stamp} has passed; {nxt_txt}"}
 
 
 # ------------------------------------------------------------------ sampling
@@ -410,21 +545,32 @@ def main() -> int:
     ap.add_argument("--horizon", type=int, default=None)
     ap.add_argument("--seed", type=int, default=42)
     ap.add_argument("--enrich", type=Path, default=None, help="enrich.json from solio_enrich.py")
+    ap.add_argument(
+        "--enrich-strict",
+        action="store_true",
+        help="fail (exit 1, no scenarios written) if --enrich is for a different gameweek, instead of degrading to priors",
+    )
     ap.add_argument("--calibrate-only", action="store_true")
     args = ap.parse_args()
 
     blend = load_blend(args.data_dir, args.sources, args.horizon)
+    # Before anything expensive: is the week we are planning still playable?
+    lock_status = check_first_gw_open(blend.attrs["gameweeks"][0])
     dec = decompose(blend)
     dec.attrs["gameweeks"] = blend.attrs["gameweeks"]
+    enrich_status = {"state": "NONE"}
     if args.enrich:
-        dec = apply_enrichment(dec, args.enrich)
+        dec, enrich_status = apply_enrichment(dec, args.enrich, strict=args.enrich_strict)
         dec.attrs["gameweeks"] = blend.attrs["gameweeks"]
+        if args.enrich_strict and enrich_status["state"] == "SKIPPED":
+            return 1
 
     print(f"[scen] {len(dec)} players, GWs {dec.attrs['gameweeks'][0]}-{dec.attrs['gameweeks'][-1]}, sources {args.sources}")
 
     diag = calibrate_and_report(dec, min(150, max(args.scenarios, 50)), args.seed + 1)
     print(f"[scen] calibration: bias {diag['mean_bias_pts']:+.3f} pts, MAE {diag['mean_abs_err_pts']:.3f}, corr {diag['corr_emp_vs_proj']:.4f}")
     if args.calibrate_only:
+        run_summary(enrich_status, lock_status)
         return 0
 
     args.out.mkdir(parents=True, exist_ok=True)
@@ -455,6 +601,8 @@ def main() -> int:
         "seed": args.seed,
         "gameweeks": gws,
         "diagnostics": diag,
+        "enrichment": enrich_status,
+        "first_gw": lock_status,
         "priors": {
             "share": SHARE,
             "assist_fraction": ASSIST_FRACTION,
@@ -464,6 +612,7 @@ def main() -> int:
     }
     (args.out / "manifest.json").write_text(json.dumps(manifest, indent=2))
     print(f"[scen] wrote {args.scenarios} scenarios + summary to {args.out}/")
+    run_summary(enrich_status, lock_status)
     return 0
 
 
