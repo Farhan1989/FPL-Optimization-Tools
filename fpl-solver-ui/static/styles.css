@@ -483,7 +483,12 @@ main { padding: 28px var(--gut) 80px; min-width: 0; }
    the consequence visible after the select has reset itself. */
 .squad-fill option[data-stale] { color: var(--flag); }
 .param input.is-stale { border-color: var(--flag); }
+/* An entry we could not check is neither confident colour. Amber is reserved
+   for "we checked and it is wrong"; muted says "we could not check". */
+.squad-fill option[data-trust="unknown"] { color: var(--mute); }
+.param input.is-unverified { border-color: var(--mute); }
 .squad-warn {
   font-family: var(--mono); font-size: 10.5px; line-height: 1.45;
   color: var(--flag); margin-top: 2px;
 }
+.squad-warn.is-soft { color: var(--mute); }

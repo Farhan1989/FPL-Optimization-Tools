@@ -172,8 +172,22 @@ def resolve_forced(meta: pd.DataFrame, spec: str, label: str = "--force") -> lis
     would be inventing a rule. What does apply is that every ID must resolve:
     the old `meta.ID.isin(...)` path dropped one that did not and solved anyway,
     silently ignoring the player the user asked to force in.
+
+    The club limit applies too, and it is the one squad rule a --force list can
+    break entirely on its own. `build_and_solve` posts `club1_<t> <= CLUB_LIMIT`
+    for every club (and the same per week per scenario) alongside `sq1[p] == 1`
+    for every forced row, so a fourth forced player from one club is infeasible
+    BY CONSTRUCTION — no choice of the other eleven rescues it, and the stage-2
+    replicas make it infeasible in every branch too. Naming the club up front
+    costs nothing; the alternative is spending the full --secs to learn nothing.
+
+    Nothing else is re-derived here. --force carries no size and no positional
+    quota, so the other ways a list can prove unbuildable are the model's
+    verdict to give — SolveError now gives it instead of crashing.
     """
-    return resolve_ids(meta, spec, label)
+    rows = resolve_ids(meta, spec, label)
+    check_club_limit(meta, rows, label)
+    return rows
 
 
 def resolve_squad(meta: pd.DataFrame, spec: str, label: str = "--squad") -> list[int]:
@@ -221,6 +235,19 @@ def check_club_limit(meta: pd.DataFrame, rows: list[int], label: str) -> None:
 
 
 # ------------------------------------------------------------------- model
+
+
+class SolveError(RuntimeError):
+    """The two-stage MILP came back without a usable stage-1 plan.
+
+    Distinct from SquadError, which is about an ID list that was never legal.
+    This is the model's verdict on constraints that were each individually
+    fine: a --force list inside the club limit can still be unbuildable against
+    the bank and the free-transfer count, and a time limit can expire with no
+    incumbent. Both used to surface as a bare StopIteration. Stage 1 is the
+    move the user actually executes, so a half-read solution must never be
+    printed as a plan.
+    """
 
 
 def build_and_solve(meta, pts, F, d, cfg):
@@ -377,20 +404,42 @@ def build_and_solve(meta, pts, F, d, cfg):
     h.run()
     Path("two_stage.mps").unlink(missing_ok=True)
     info = h.getInfo()
-    vals = np.array(h.getSolution().col_value)
+    sol = h.getSolution()
+    vals = np.array(sol.col_value)
     names = [h.getColName(i)[1] for i in range(h.getNumCol())]
     idx = {nm: i for i, nm in enumerate(names)}
 
     def val(name):
         return vals[idx[name]]
 
-    squad1 = [p for p in players if val(f"sq1[{p}]") > 0.5]
+    # HiGHS does NOT raise on an infeasible MILP, and does not hand back an
+    # empty solution either: `value_valid` goes False and `col_value` comes back
+    # ZERO-FILLED to the right length. Every `> 0.5` test below then fails, so
+    # `squad1` was [] and `next(p for p in players if val(f"c1[{p}]") > 0.5)` —
+    # a generator with no default — raised a bare StopIteration. Four forced
+    # players from one club reported itself as a traceback out of a dict
+    # literal, with no mention of clubs, forcing or infeasibility.
+    status = h.modelStatusToString(h.getModelStatus())
+    sol_valid = sol.value_valid
+    squad1 = [p for p in players if val(f"sq1[{p}]") > 0.5] if sol_valid else []
+    if not sol_valid or len(squad1) != SQUAD_SIZE:
+        hint = (
+            "a --force list can pass every up-front check and still be unbuildable: too many forced "
+            "players, an impossible positional mix, or more than --itb and --fts can pay for"
+            if cfg.get("forced_in")
+            else "check --squad, --itb and --fts against the holding, and raise --secs if the status is a limit rather than infeasibility"
+        )
+        raise SolveError(f"no feasible stage-1 plan (HiGHS status: {status}); the solve returned {len(squad1)} of {SQUAD_SIZE} players — {hint}")
+    captain1 = next((p for p in players if val(f"c1[{p}]") > 0.5), None)
+    if captain1 is None:
+        raise SolveError(f"no stage-1 captain in the returned solution (HiGHS status: {status}) — the solve is not usable")
+
     res = {
         "objective": -float(info.objective_function_value),
         "gap": float(info.mip_gap),
         "squad1": squad1,
         "lineup1": [p for p in players if val(f"y1[{p}]") > 0.5],
-        "captain1": next(p for p in players if val(f"c1[{p}]") > 0.5),
+        "captain1": captain1,
         "tin1": [p for p in players if val(f"tin1[{p}]") > 0.5],
         "tout1": [p for p in players if val(f"tout1[{p}]") > 0.5],
         "hits1": float(val("pt1")),
@@ -509,7 +558,11 @@ def main() -> int:
         "forced_in": forced,
         "max_rt": args.max_recourse_transfers,
     }
-    res = build_and_solve(meta_p, pts, F, d, cfg)
+    try:
+        res = build_and_solve(meta_p, pts, F, d, cfg)
+    except SolveError as exc:
+        print(f"[2stage] {exc} — NO PLAN REPORTED", file=sys.stderr)
+        return 1
 
     print(f"\n[2stage] objective {res['objective']:.2f}  (gap {res['gap'] * 100:.2f}%)")
     if args.preseason:
@@ -525,6 +578,15 @@ def main() -> int:
         print(f"\nStage-1 transfers: {tout} -> {tin}  (hits: {res['hits1']:.0f})")
         print(f"Captain: {meta_p.iloc[res['captain1']].Name}")
 
+    # Machine-readable twin of the human lines above. The transfers line names
+    # PLAYERS, and names are ambiguous in this dataset ("Palmer" resolves to two
+    # FPL ids this season), so the UI could not offer B4's output as a squad fill
+    # at all. Emitting the post-transfer fifteen as ids removes the guesswork:
+    # no base squad to reconstruct, nothing to match by name. Both arms print it
+    # — the preseason table was already discoverable and stays so.
+    squad_ids = sorted(int(i) for i in meta_p.iloc[res["squad1"]].ID)
+    print(f"[2stage] stage-1 squad IDs: {','.join(str(i) for i in squad_ids)}")
+
     # branch report: what does the recourse do, and how often?
     move_counter = Counter()
     for moves in res["branches"]:
@@ -539,11 +601,17 @@ def main() -> int:
         print("\n[2stage] VSS: solving certainty-equivalent (mean) problem ...")
         mean_pts = pts.mean(axis=0, keepdims=True)
         cfg_m = dict(cfg)
-        res_m = build_and_solve(meta_p, mean_pts, np.array([F.mean()]), d, cfg_m)
-        print("[2stage] evaluating its stage-1 under the full scenario set ...")
-        cfg_f = dict(cfg)
-        cfg_f["fixed_stage1"] = {"squad": set(res_m["squad1"])}
-        res_f = build_and_solve(meta_p, pts, F, d, cfg_f)
+        try:
+            res_m = build_and_solve(meta_p, mean_pts, np.array([F.mean()]), d, cfg_m)
+            print("[2stage] evaluating its stage-1 under the full scenario set ...")
+            cfg_f = dict(cfg)
+            cfg_f["fixed_stage1"] = {"squad": set(res_m["squad1"])}
+            res_f = build_and_solve(meta_p, pts, F, d, cfg_f)
+        except SolveError as exc:
+            # The stage-1 plan above has already been printed and still stands;
+            # exit 1 because the VSS that was asked for was not produced.
+            print(f"[2stage] VSS arm: {exc} — NO VSS REPORTED", file=sys.stderr)
+            return 1
         vss = res["objective"] - res_f["objective"]
         print(f"\n[2stage] stochastic obj {res['objective']:.2f} | mean-plan-with-recourse {res_f['objective']:.2f} | VSS = {vss:+.2f}")
         a = set(meta_p.iloc[res["squad1"]].ID)

@@ -52,6 +52,10 @@ function fillSquadOptions(sel) {
     o.textContent = sq.label;
     o.title = sq.note || '';
     if (sq.stale) o.dataset.stale = '1';
+    /* Three states, not two. 'unknown' is an entry we could not check — no
+       provenance header on its log, or the live API was unreachable. It gets
+       its own muted colour rather than either of the confident ones. */
+    if (sq.trust && sq.trust !== 'fresh') o.dataset.trust = sq.trust;
     sel.append(o);
   });
   sel.value = keep;
@@ -327,11 +331,16 @@ function renderSteps(steps) {
           pick.onchange = () => {
             const sq = squadCache.list.find(s => s.key === pick.value);
             if (sq) {
+              const unverified = !sq.stale && sq.trust === 'unknown';
               input.value = sq.ids.join(',');
               input.dispatchEvent(new Event('change'));
-              warn.hidden = !sq.stale;
-              warn.textContent = sq.stale ? `stale fill — ${sq.note || sq.label}` : '';
+              warn.hidden = !(sq.stale || unverified);
+              warn.textContent = sq.stale ? `stale fill — ${sq.note || sq.label}`
+                : unverified ? `unverified fill — ${sq.note || sq.label}`
+                : '';
+              warn.classList.toggle('is-soft', unverified);
               input.classList.toggle('is-stale', !!sq.stale);
+              input.classList.toggle('is-unverified', unverified);
             }
             pick.value = '';
           };

@@ -14,7 +14,7 @@ import pandas as pd
 import pytest
 
 import validate_sources as vs
-from validate_sources import Report, check_blend, check_decay, check_fixtures, check_xmins_multiplier, gameweeks
+from validate_sources import Report, check_blend, check_contiguity, check_decay, check_fixtures, check_xmins_multiplier, gameweeks
 
 DEFAULT_GWS = (1, 2, 3, 4, 5, 6)
 
@@ -488,3 +488,106 @@ def test_main_warns_when_the_bootstrap_is_absent(tmp_path, monkeypatch, capsys):
     )
     assert code == 0
     assert "availability checks skipped" in capsys.readouterr().out
+
+
+# -------------------------------------------------------- check_contiguity
+
+
+def test_check_contiguity_passes_an_unbroken_run():
+    rep = Report()
+    check_contiguity("review", source(gws=(5, 6, 7, 8)), rep)
+    assert rep.failures == [] and rep.warnings == []
+
+
+def test_check_contiguity_does_not_require_the_run_to_start_at_one():
+    """A mid-season export legitimately starts at the next gameweek, so the run
+    is not pinned to any particular first number — only to having no holes."""
+    rep = Report()
+    check_contiguity("review", source(gws=(5, 6, 7)), rep)
+    assert rep.failures == [] and rep.warnings == []
+
+
+def test_check_contiguity_allows_sources_with_different_horizon_lengths():
+    """The real passing case: review GW5-18 against solio GW5-16. A short TAIL
+    is not a gap, and read_mixed renormalises per gameweek (PROJECT.md §4.6)."""
+    rep = Report()
+    check_contiguity("review", source(gws=tuple(range(5, 19))), rep)
+    check_contiguity("solio", source(gws=tuple(range(5, 17))), rep)
+    assert rep.failures == [] and rep.warnings == []
+
+
+def test_check_contiguity_fails_on_an_interior_gap():
+    """5, 6, 8 — the signal is the hole at 7, which `gameweeks()` cannot see
+    because it reads whatever `_Pts` columns happen to exist."""
+    rep = Report()
+    check_contiguity("review", source(gws=(5, 6, 8)), rep)
+    assert len(rep.failures) == 1
+    assert "GW7" in rep.failures[0]
+    assert "GW5-GW8" in rep.failures[0]
+
+
+def test_check_contiguity_names_every_missing_gameweek():
+    rep = Report()
+    check_contiguity("solio", source(gws=(5, 6, 9, 10, 13)), rep)
+    assert "GW7, GW8, GW11, GW12" in rep.failures[0]
+    assert "carries 5 of 9" in rep.failures[0]
+
+
+def test_check_contiguity_is_a_failure_not_a_warning():
+    """House rule: FAIL where there is no usable degraded mode. Everything
+    downstream weights by POSITION — scenario_generator.load_blend slices
+    `shared[:horizon]` and both risk solvers use `decay ** i` over the columns
+    present — so a gap silently reweights the objective and reaches one week
+    further into the season. No flag makes that right."""
+    rep = Report()
+    check_contiguity("review", source(gws=(1, 2, 4)), rep)
+    assert rep.warnings == [] and len(rep.failures) == 1
+
+
+def test_check_contiguity_says_nothing_about_a_single_gameweek_source():
+    """One gameweek has no interior, so no gap is possible."""
+    rep = Report()
+    check_contiguity("review", source(gws=(7,)), rep)
+    assert rep.failures == [] and rep.warnings == []
+
+
+def test_check_contiguity_handles_a_frame_carrying_no_gameweeks_at_all():
+    rep = Report()
+    check_contiguity("review", pd.DataFrame({"ID": [1], "Name": ["x"]}), rep)
+    assert rep.failures == [] and rep.warnings == []
+
+
+def test_main_fails_when_a_source_is_missing_an_interior_gameweek(tmp_path, monkeypatch, capsys):
+    write_sources(
+        tmp_path,
+        solio=source(gws=(1, 2, 3, 5), team_of=two_teams),
+        review=source(gws=(1, 2, 3, 5), team_of=two_teams),
+    )
+    code = run_main(monkeypatch, ["--sources", "solio", "review", "--data-dir", str(tmp_path)])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "FAIL  solio: GW1-GW5 has 1 missing gameweek(s) (GW4)" in out
+    assert "FAIL  review: GW1-GW5 has 1 missing gameweek(s) (GW4)" in out
+    assert "VALIDATION FAILED" in out
+
+
+def test_main_fails_when_the_blend_dropped_a_gameweek_the_sources_both_carry(tmp_path, monkeypatch, capsys):
+    """The case the gate was blind to: both sources carry GW3, so the halved-GW
+    check has nothing single-source to compare, and a blend that dropped GW3
+    outright just looked like a shorter horizon."""
+    a = source(gws=(1, 2, 3, 4), team_of=two_teams)
+    write_sources(tmp_path, solio=a, review=source(gws=(1, 2, 3, 4), team_of=two_teams))
+    a.drop(columns=["3_Pts", "3_xMins"]).to_csv(tmp_path / "mixed.csv", index=False)
+
+    code = run_main(monkeypatch, ["--sources", "solio", "review", "--data-dir", str(tmp_path), "--mixed", "mixed.csv"])
+    out = capsys.readouterr().out
+    assert code == 1
+    assert "FAIL  mixed: GW1-GW4 has 1 missing gameweek(s) (GW3)" in out
+
+
+def test_main_does_not_report_contiguity_for_a_mixed_file_that_was_not_supplied(tmp_path, monkeypatch, capsys):
+    """check_blend gets a `dfs[0].iloc[0:0]` placeholder when --mixed is absent.
+    That placeholder is not a blend, so it must not be reported on as one."""
+    write_sources(tmp_path, solio=source(team_of=two_teams), review=source(team_of=two_teams))
+    assert run_main(monkeypatch, ["--sources", "solio", "review", "--data-dir", str(tmp_path)]) == 0
+    assert "mixed: GW" not in capsys.readouterr().out

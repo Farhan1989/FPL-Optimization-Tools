@@ -4,6 +4,8 @@ validate_sources.py — pre-solve sanity checks on projection CSVs.
 
 Catches the failure modes actually found in the 25/26 data:
 
+  0. GAPS in a gameweek run (5, 6, 8 — 7 missing). Checked before everything
+     else, because every later check assumes the run is unbroken.
   1. DECAY baked into a source. Decay belongs in `decay_base` only. A source
      that arrives pre-decayed silently reweights a blend by horizon distance.
   2. FIXTURE MISALIGNMENT between sources (blank/double disagreement). Blending
@@ -54,6 +56,7 @@ UNAVAILABLE_STATUS = {"u"}  # u = unavailable/left the league.
 GHOST_PTS_THRESHOLD = 1.0  # projected pts that make a ghost worth flagging
 RISING_XMINS = 1.02  # ratio above this counts as rising
 DECLINE_XMINS = 0.99  # median ratio below this = declining
+MIN_GWS_FOR_GAP = 2  # one gameweek has no interior, so no gap is possible
 
 
 class Report:
@@ -79,6 +82,57 @@ def load(path: Path) -> pd.DataFrame:
 
 def gameweeks(df: pd.DataFrame) -> list[int]:
     return sorted(int(c.split("_")[0]) for c in df.columns if c.endswith("_Pts"))
+
+
+# ---------------------------------------------------------------- check 0
+
+
+def check_contiguity(name: str, df: pd.DataFrame, rep: Report) -> None:
+    """The gameweeks a source carries must form an unbroken run — no GAP.
+
+    `gameweeks()` derives the horizon from whichever `_Pts` columns happen to be
+    present, so a file that dropped GW7 outright looks like a perfectly ordinary
+    13-gameweek export and nothing else here notices: the halved-gameweek check
+    only fires on a gameweek that is *present* in one source and absent from the
+    other, and a gameweek missing from everything is present nowhere to compare.
+
+    FAIL, not WARN, on two independent grounds.
+
+    There is no degraded mode. Everything downstream is positional, not indexed
+    by gameweek number: `scenario_generator.load_blend` takes `shared[:horizon]`
+    by POSITION, and both risk solvers weight with `decay ** i` over the columns
+    they find. A missing interior gameweek therefore pulls every later gameweek
+    one decay slot earlier AND reaches one gameweek further into the season than
+    the horizon asked for — silently reweighting the objective, which is the
+    §4.2 decay failure arriving by a different road. No flag makes that right.
+
+    And a gap is never legitimate data. A source covering GW5..GW18 publishes
+    every week in between; a hole means the CSV was assembled wrong (a partial
+    download, a bad merge, a hand-edited column). Unlike a short tail there is
+    no reading of it under which the file is correct.
+
+    A short TAIL is a different thing and stays silent here. Sources
+    legitimately carry different horizon lengths — review GW5-18 against solio
+    GW5-16 is the ordinary case, and `read_mixed` renormalises per gameweek so
+    the single-source weeks are not halved (§4.6) — and a mid-season export
+    legitimately starts at the next gameweek. So the run is NOT required to
+    start at any particular number, or to reach any particular one. Only to
+    have no holes in it.
+    """
+    gws = gameweeks(df)
+    if len(gws) < MIN_GWS_FOR_GAP:
+        return
+    span = f"GW{gws[0]}-GW{gws[-1]}"
+    missing = sorted(set(range(gws[0], gws[-1] + 1)) - set(gws))
+    if missing:
+        gaps = ", ".join(f"GW{g}" for g in missing)
+        rep.fail(
+            f"{name}: {span} has {len(missing)} missing gameweek(s) ({gaps}) — carries {len(gws)} of "
+            f"{gws[-1] - gws[0] + 1}  -> a GAP, not a short horizon: every later gameweek shifts "
+            "into an earlier decay slot. Regenerate the export."
+        )
+    else:
+        rep.ok(f"{name}: {span} contiguous, {len(gws)} gameweeks")
 
 
 # ---------------------------------------------------------------- check 1
@@ -339,6 +393,13 @@ def main() -> int:  # noqa: PLR0912
 
     rep = Report()
 
+    # First: every check below assumes an unbroken gameweek run. check_decay in
+    # particular fits its trend against COLUMN POSITION (`np.polyfit(idx, ...)`),
+    # so a gap would quietly stretch the implied per-GW factor as well.
+    print("\n[0] horizon continuity")
+    for n, d in zip(names, dfs, strict=True):
+        check_contiguity(n, d, rep)
+
     print("\n[1] source decay")
     for n, d in zip(names, dfs, strict=True):
         check_decay(n, d, rep)
@@ -361,7 +422,13 @@ def main() -> int:  # noqa: PLR0912
     if args.mixed:
         mpath = args.data_dir / args.mixed
         if mpath.exists():
-            check_blend(names, dfs, load(mpath), rep)
+            mixed = load(mpath)
+            # The blend is the file the solver actually reads, so a gameweek the
+            # sources both carry and the blend dropped is the case that matters
+            # most. Only checked when a real --mixed was supplied: the
+            # `dfs[0].iloc[0:0]` placeholder below is not a blend at all.
+            check_contiguity("mixed", mixed, rep)
+            check_blend(names, dfs, mixed, rep)
         else:
             rep.warn(f"{mpath} not found, blend checks skipped")
     elif len(dfs) >= MIN_SOURCES_TO_COMPARE:

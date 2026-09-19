@@ -328,6 +328,9 @@ blank/double calendars by hand and score under each.
 | `--fts` / `--itb` rejected | outside 0..5, or a negative bank | the FT cap is the model's own `FT_CAP = 5` |
 | `mixed: N gameweek(s) carry Pts but no xMins` | malformed blend | regenerate `mixed.csv`; xMins drives minutes sampling, there is no degraded mode |
 | `none of the N .log file(s) contained a parseable plan` | chip `score` run before `enumerate` | run C1 first (§4) |
+| chip flag rejected with "outside 1..38" | a typo'd grid value | `--bb 0` used to name its plan `nochip` and overwrite the real no-chip solve |
+| *Fill from…* entry marked `· unverified` | the log predates provenance headers, or the API was unreachable | the ids are probably right but nothing could confirm the squad it was seeded with |
+| B4's squad missing from *Fill from…* | log predates the `stage-1 squad IDs` line | re-run B4; older logs only expose squads the readers can derive |
 
 ---
 

@@ -11,6 +11,7 @@ stock solver's real printed format — `dev/solver.py` builds the summary and
 
 from __future__ import annotations
 
+import argparse
 import json
 import sys
 
@@ -139,6 +140,70 @@ def test_parse_candidate_rejects_malformed_input(text, expected):
         parse_candidate(text)
     assert expected in str(exc.value)
     assert "bb:1,fh:3,wc:7" in str(exc.value)  # every message shows the syntax
+
+
+# --------------------------------------------- parse_candidate: GW range
+#
+# The bound is the SEASON, 1..38, not the first-set deadline. 26/27 has TWO
+# chip sets (PROJECT.md §4.7): the first expires at the GW19 deadline, the
+# second runs after it, and scoring a second-set calendar is an explicit
+# workflow (runbook §4). Anything narrower than 1..38 would reject half the
+# season's legal plans. The floor is 1 rather than 0 because combo_name spells
+# "chip not played" as a falsy gameweek.
+
+
+@pytest.mark.parametrize("gw", [1, 2, 18, 19, 20, 37, 38])
+def test_parse_candidate_accepts_every_gameweek_in_the_season(gw):
+    assert parse_candidate(f"bb:{gw}") == {"bb": gw}
+
+
+def test_parse_candidate_does_not_stop_at_the_first_set_deadline():
+    """A 1..19 bound would be defensible only if this tool were first-set only.
+    It is not — the second set has to be plannable through the same entry."""
+    gw = cp.FIRST_SET_DEADLINE_GW + 1
+    assert parse_candidate(f"wc:{gw}") == {"wc": gw}
+    assert parse_candidate(f"bb:{cp.LAST_GW}") == {"bb": cp.LAST_GW}
+
+
+def test_parse_candidate_rejects_gameweek_zero():
+    """The dangerous one. `bb:0` parsed, and combo_name — which spells an
+    unplayed chip as a falsy gameweek — then dropped it, so a one-key typo
+    produced a plan silently missing a bench boost rather than an error."""
+    with pytest.raises(SystemExit) as exc:
+        parse_candidate("bb:0")
+    msg = str(exc.value)
+    assert "gameweek 0 for chip 'bb'" in msg
+    assert f"outside {cp.FIRST_GW}..{cp.LAST_GW}" in msg
+    assert "silently drop the chip" in msg
+
+
+def test_a_zero_gameweek_really_is_indistinguishable_from_no_chip():
+    """Why the floor is 1 and not 0: this is what used to get through."""
+    assert combo_name(dict.fromkeys(cp.CHIPS) | {"bb": 0}) == combo_name(dict.fromkeys(cp.CHIPS))
+
+
+@pytest.mark.parametrize("gw", [39, 44, 100])
+def test_parse_candidate_rejects_gameweeks_past_the_end_of_the_season(gw):
+    with pytest.raises(SystemExit) as exc:
+        parse_candidate(f"bb:{gw}")
+    msg = str(exc.value)
+    assert f"gameweek {gw} for chip 'bb'" in msg
+    assert f"the season has {cp.LAST_GW} gameweeks" in msg
+
+
+def test_parse_candidate_rejects_a_bad_gameweek_beside_good_ones():
+    """One bad entry condemns the whole candidate, not just its own chip."""
+    with pytest.raises(SystemExit) as exc:
+        parse_candidate("bb:1,fh:0,wc:7")
+    assert "gameweek 0 for chip 'fh'" in str(exc.value)
+
+
+def test_a_negative_gameweek_is_still_a_syntax_error_not_a_range_error():
+    """Pins the order: `-1` never reaches the range check because `.isdigit()`
+    rejects the token first, so the message stays the syntax one."""
+    with pytest.raises(SystemExit) as exc:
+        parse_candidate("bb:-1")
+    assert "is not a gameweek number" in str(exc.value)
 
 
 # -------------------------------------------------------------- combo_name
@@ -535,3 +600,47 @@ def test_tc_table_ranks_by_tail_mass_not_mean(tmp_path, monkeypatch, capsys):
     assert "Best TC weeks by P(haul>=15)" in out
     body = out.split("Best TC weeks by P(haul>=15):")[1]
     assert body.strip().splitlines()[1].split()[1] == "Bravo"
+
+
+# ------------------------------------------------ grid-flag gameweek bounds
+# `parse_candidate` was range-checked, but the --bb/--fh/--wc/--tc grid was
+# not, and that gap was not cosmetic: `combo_name` spells "chip not played"
+# as a falsy gameweek, so `--bb 0` named its plan `nochip` and collided with
+# the genuine no-chip combination — same plans/ filename, same manifest key —
+# so one full MILP solve silently overwrote another.
+
+
+def test_check_gw_accepts_the_whole_season():
+    for gw in (cp.FIRST_GW, 19, cp.LAST_GW):
+        assert cp.check_gw(gw, "bb", "--bb") == gw
+
+
+def test_check_gw_rejects_zero_and_names_the_collision():
+    with pytest.raises(SystemExit) as exc:
+        cp.check_gw(0, "bb", "--bb")
+    assert "unplayed chip is spelled" in str(exc.value)
+    assert "--bb" in str(exc.value)
+
+
+@pytest.mark.parametrize("gw", [-1, 39, 44])
+def test_check_gw_rejects_out_of_season(gw):
+    with pytest.raises(SystemExit) as exc:
+        cp.check_gw(gw, "fh", "--fh")
+    assert "38 gameweeks" in str(exc.value)
+
+
+def test_a_zero_grid_value_would_have_collided_with_the_real_nochip_combo():
+    """Why the floor is 1 rather than just 'because'."""
+    nochip = dict.fromkeys(cp.CHIPS)
+    assert cp.combo_name(nochip | {"bb": 0}) == cp.combo_name(nochip)
+
+
+@pytest.mark.parametrize("chip", ["bb", "fh", "wc", "tc"])
+def test_enumerate_validates_every_grid_flag_before_solving(chip, tmp_path):
+    """Must fail before any MILP starts — each combination is minutes of work."""
+    args = argparse.Namespace(bb=[], fh=[], wc=[], tc=[], candidates=[], plans=str(tmp_path / "plans"), workers=1)
+    setattr(args, chip, [0])
+    with pytest.raises(SystemExit) as exc:
+        cp.cmd_enumerate(args)
+    assert f"--{chip}" in str(exc.value)
+    assert not (tmp_path / "plans").exists()

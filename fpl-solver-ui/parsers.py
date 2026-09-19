@@ -35,6 +35,7 @@ from __future__ import annotations
 import csv
 import json
 import re
+import shlex
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -480,6 +481,22 @@ GW_HEAD_RE = re.compile(r"^\s+\*\* GW (\d+):")
 SQUAD_SIZE = 15
 
 
+STAGE1_IDS_RE = re.compile(r"^\[2stage\] stage-1 squad IDs:\s*([\d,\s]+?)\s*$", re.M)
+
+
+def _ids_from_stage1_ids_line(text: str) -> List[int]:
+    """The authoritative line stochastic_solver.py prints for BOTH arms.
+
+    Preferred over every other reader here: the solver states its own fifteen
+    as ids, so there is no base squad to reconstruct and no name to resolve.
+    The other readers remain for logs written before this line existed."""
+    m = STAGE1_IDS_RE.search(text)
+    if not m:
+        return []
+    ids = [int(x) for x in m.group(1).replace(" ", "").split(",") if x]
+    return ids if len(ids) == SQUAD_SIZE and len(set(ids)) == SQUAD_SIZE else []
+
+
 def _ids_from_stage1(text: str) -> List[int]:
     """The stage-1 table printed by stochastic_solver.py --preseason."""
     if STAGE1_HEADER not in text:
@@ -579,6 +596,128 @@ def _archive_squad(archive_dir: Optional[Path]) -> Optional[Dict[str, Any]]:
     return best
 
 
+# ------------------------------------------------- how far to trust an entry
+
+# Three states, and the middle one is the whole point. "We found no problem"
+# and "we checked and there is no problem" are different claims, and the bug
+# this file has already been bitten by was the first rendered as the second.
+# An entry we cannot check is offered — never removed — but never called fresh.
+TRUST_FRESH = "fresh"  # checked against the live squad, and it agrees
+TRUST_UNKNOWN = "unknown"  # not checkable: no provenance, or no live squad
+TRUST_STALE = "stale"  # checked, and it is not your current squad
+
+# Sort order for the dropdown: a trustworthy entry is never below an
+# untrustworthy one, and the option a hurried click lands on is the safest.
+TRUST_RANK = {TRUST_FRESH: 0, TRUST_UNKNOWN: 1, TRUST_STALE: 2}
+
+
+def _worst(*states: str) -> str:
+    """The least trustworthy of several verdicts. Evidence of staleness from
+    any one source is evidence of staleness, whatever the others say."""
+    return max(states, key=lambda s: TRUST_RANK.get(s, 1))
+
+
+def _decorate(trust: str, label: str) -> str:
+    """Staleness belongs in the dropdown text.
+
+    `note` is rendered by static/app.js as a hover tooltip only, and a warning
+    you have to hover to see is not a warning. The label is the one string
+    that is always on screen while the option is being chosen."""
+    if trust == TRUST_STALE:
+        return f"STALE · {label}"
+    if trust == TRUST_UNKNOWN:
+        return f"{label} · unverified"
+    return label
+
+
+# The `#` provenance block app.py writes above captured output: `# command`
+# carries the full argv, and the argv carries the `--squad` the solve was
+# seeded with. Only the *leading* run of `#` lines is read, so a `#` further
+# down in solver output can never be mistaken for provenance.
+HEADER_ROW_RE = re.compile(r"^#\s+([a-z][a-z ]*?)\s{2,}(.+?)\s*$")
+LOG_COMMENT = "#"
+
+# Flags that mean "there is no squad to be seeded with" rather than "the seed
+# was omitted". stochastic_solver.py requires one of --preseason or --squad,
+# and refuses to start without either, so the distinction is never ambiguous.
+SQUAD_FREE_FLAGS = {"--preseason", "--wildcard", "--wc", "--free-hit", "--freehit"}
+
+
+def _parse_ids(value: str) -> List[int]:
+    out: List[int] = []
+    for chunk in re.split(r"[,\s]+", (value or "").strip()):
+        try:
+            out.append(int(chunk))
+        except ValueError:
+            continue
+    return out
+
+
+def seed_from_command(command: str) -> Dict[str, Any]:
+    """What squad, if any, this argv seeded its solve with.
+
+    Split with shlex rather than a regex so a quoted value is one token, the
+    same way app.py builds the argv in the first place."""
+    try:
+        argv = shlex.split(command)
+    except ValueError:
+        return {"seed": None, "squad_free": False}
+
+    seed: Optional[List[int]] = None
+    squad_free = False
+    for i, token in enumerate(argv):
+        if token in SQUAD_FREE_FLAGS:
+            squad_free = True
+        elif token == "--squad" and i + 1 < len(argv):
+            seed = _parse_ids(argv[i + 1])
+        elif token.startswith("--squad="):
+            seed = _parse_ids(token.split("=", 1)[1])
+    # An explicit --squad wins: a run handed a squad solved from that squad,
+    # whatever else was on the command line.
+    return {"seed": seed or None, "squad_free": squad_free and not seed}
+
+
+def read_log_provenance(text: str) -> Dict[str, Any]:
+    """The run record app.py writes above the output, or an empty one."""
+    rows: Dict[str, str] = {}
+    for line in text.splitlines():
+        if not line.startswith(LOG_COMMENT):
+            break
+        match = HEADER_ROW_RE.match(line)
+        if match:
+            rows.setdefault(match.group(1).strip(), match.group(2))
+
+    prov: Dict[str, Any] = {
+        "header": bool(rows),
+        "step": rows.get("step"),
+        "command": rows.get("command"),
+        "finished": rows.get("finished"),
+        "seed": None,
+        "squad_free": False,
+    }
+    if prov["command"]:
+        prov.update(seed_from_command(prov["command"]))
+    return prov
+
+
+HORIZON_RE = re.compile(r"\bGWs?\s(\d+)\s*-\s*\d+\b")
+
+
+def _solve_horizon(text: str) -> Optional[int]:
+    """The first gameweek this solve was built for.
+
+    Two shapes, because two families of tool print it: the stochastic and CVaR
+    banners say `GWs 5-9`, the stock solver heads its first block `** GW 5:`."""
+    match = HORIZON_RE.search(text)
+    if match:
+        return int(match.group(1))
+    for line in text.splitlines():
+        head = GW_HEAD_RE.match(line)
+        if head:
+            return int(head.group(1))
+    return None
+
+
 def _squads_for_your_team(archive_dir: Optional[Path], live: Optional[Dict[str, Any]]) -> List[Dict[str, Any]]:
     """The "your team" entries, told truthfully.
 
@@ -616,6 +755,7 @@ def _squads_for_your_team(archive_dir: Optional[Path], live: Optional[Dict[str, 
                 "source": "live",
                 "gw": gw,
                 "stale": False,
+                "trust": TRUST_FRESH,
             }
         ]
 
@@ -629,6 +769,7 @@ def _squads_for_your_team(archive_dir: Optional[Path], live: Optional[Dict[str, 
                 "source": "live",
                 "gw": live_gw,
                 "stale": False,
+                "trust": TRUST_FRESH,
             }
         )
 
@@ -637,6 +778,7 @@ def _squads_for_your_team(archive_dir: Optional[Path], live: Optional[Dict[str, 
 
     arch_gw = arch["gw"]
     stale = current_gw is not None and arch_gw < current_gw
+    trust = TRUST_STALE if stale else (TRUST_FRESH if current_gw is not None else TRUST_UNKNOWN)
     if stale:
         label = f"STALE · archived GW{arch_gw:02d} squad (GW{current_gw:02d} is live)"
         note = (
@@ -659,6 +801,7 @@ def _squads_for_your_team(archive_dir: Optional[Path], live: Optional[Dict[str, 
             "source": "archive",
             "gw": arch_gw,
             "stale": stale,
+            "trust": trust,
         }
     )
     # Freshest first, by gameweek. Live is normally newest, but if a snapshot
@@ -666,6 +809,207 @@ def _squads_for_your_team(archive_dir: Optional[Path], live: Optional[Dict[str, 
     # ordering should follow the evidence rather than the source.
     out.sort(key=lambda e: e.get("gw") or 0, reverse=True)
     return out
+
+
+def _seed_basis(prov: Dict[str, Any]) -> str:
+    """How we know — or don't — what squad a log's solve started from."""
+    if prov.get("squad_free"):
+        return "confirmed by the squad-free flag in its recorded command line"
+    if prov.get("header"):
+        return "its recorded command line carries no `--squad`"
+    return "this log predates run provenance headers, so this rests on the log's shape alone"
+
+
+def _seed_verdict(prov: Dict[str, Any], live_ids: List[int]) -> tuple[str, str]:
+    """What the recorded argv says about the squad the solve started from."""
+    seed = prov.get("seed")
+    if seed and live_ids:
+        if set(seed) == set(live_ids):
+            return TRUST_FRESH, "its recorded `--squad` matches your live squad exactly"
+        gone = len([i for i in seed if i not in live_ids])
+        return TRUST_STALE, f"its recorded `--squad` holds {gone} player(s) your live squad no longer contains"
+    if seed:
+        return TRUST_UNKNOWN, "the log records the `--squad` it used, but the live squad could not be read to compare against"
+    if not prov.get("header"):
+        return TRUST_UNKNOWN, "this log has no provenance header, so the squad it was seeded with was never recorded"
+    return TRUST_UNKNOWN, "its recorded command line carries no `--squad`, so the seed is not recoverable from the log"
+
+
+def _stage1_ids_entry(
+    step: str,
+    ids: List[int],
+    prov: Dict[str, Any],
+    horizon: Optional[int],
+    current_gw: Optional[int],
+    live_ids: List[int],
+) -> Dict[str, Any]:
+    """The solver's own statement of its stage-1 fifteen.
+
+    Unlike `_from_scratch_entry`, a recorded `--squad` here is NOT a
+    contradiction: mid-season this squad is precisely "your team after the
+    move", so a seed is expected. What matters is whether that seed was the
+    squad you actually hold — a solve seeded with last week's team produces a
+    plan for a team you no longer own, which is the failure this whole grading
+    pass exists to catch."""
+    seed = prov.get("seed")
+    label = f"{step} · stage-1 squad"
+
+    if current_gw is None or horizon is None:
+        trust = TRUST_UNKNOWN
+        label = f"{step} · stage-1 squad · unverified"
+        why = "the solve's gameweeks or the live gameweek could not be read, so whether this plan is still actionable is unknown"
+    elif horizon < current_gw:
+        trust = TRUST_STALE
+        label = f"STALE · {step} · stage-1 squad for GW{horizon:02d}+ (GW{current_gw:02d} is live)"
+        why = f"built for GW{horizon} onwards, and GW{current_gw} is live — those gameweeks have been played"
+    elif seed and live_ids and set(seed) != set(live_ids):
+        missing = len(set(seed) - set(live_ids))
+        trust = TRUST_STALE
+        label = f"STALE · {step} · stage-1 squad (seeded with an old squad)"
+        why = (
+            f"its recorded `--squad` holds {missing} player(s) your live squad no longer contains, so the move was planned for a team you do not own"
+        )
+    elif seed and not live_ids:
+        trust = TRUST_UNKNOWN
+        label = f"{step} · stage-1 squad · unverified"
+        why = "the live squad could not be read, so whether this was seeded with your current team is unknown"
+    elif not prov.get("header"):
+        # `prov` is always a dict — it carries header=False — so test the flag,
+        # not the dict. No header means the seed was never recorded, and an
+        # unverifiable seed is UNKNOWN, never fresh: the point of this grading
+        # is that "could not check" is a different claim from "fine".
+        trust = TRUST_UNKNOWN
+        label = f"{step} · stage-1 squad · unverified"
+        why = "this log has no provenance header, so the squad it was seeded with was never recorded"
+    elif prov.get("squad_free"):
+        trust = TRUST_FRESH
+        why = "a squad-free solve (confirmed by its recorded command) built for the live gameweek"
+    else:
+        trust = TRUST_FRESH
+        why = "the solver stated these ids itself, seeded with your current squad, for the live gameweek"
+
+    return {
+        "key": f"{step}_stage1_ids",
+        "label": label,
+        "ids": ids[:SQUAD_SIZE],
+        "note": f"read from {step}.latest.log — {why}",
+        "trust": trust,
+        "stale": trust == TRUST_STALE,
+        "gw": horizon,
+        "source": "stage1_ids",
+    }
+
+
+def _from_scratch_entry(
+    step: str,
+    suffix: str,
+    kind: str,
+    ids: List[int],
+    prov: Dict[str, Any],
+    horizon: Optional[int],
+    current_gw: Optional[int],
+) -> Dict[str, Any]:
+    """A squad the solve built from nothing — preseason, or a wildcard.
+
+    There is no seed here to be stale, and calling it a stale seed would be a
+    lie about a legitimate solve. Both readers that reach this function only
+    match output a squad-free solve prints: `stochastic_solver.py` prints its
+    "Stage-1 squad" table under `if args.preseason` and nowhere else, and a
+    first gameweek in which all fifteen players are Buys is a squad bought
+    from scratch. Where a header exists the argv confirms it.
+
+    What *can* be wrong is different, and the old label hid it. These fifteen
+    were chosen for the solve's own gameweeks. Once those have been played the
+    squad is a historical answer, and filling it into `--squad` seeds the next
+    solve with a team that was never yours."""
+    if prov.get("seed"):
+        # Reader and argv disagree. Report the disagreement, don't pick one.
+        trust = TRUST_UNKNOWN
+        why = "the log's shape says this squad was built from scratch, but its recorded command passed a `--squad`; the two disagree"
+    elif current_gw is None:
+        trust = TRUST_UNKNOWN
+        why = "the live gameweek could not be read, so whether its gameweeks have been played is unknown"
+    elif horizon is None:
+        trust = TRUST_UNKNOWN
+        why = "the log does not record which gameweeks this squad was built for"
+    elif horizon < current_gw:
+        trust = TRUST_STALE
+        why = f"it was built for GW{horizon:02d} onwards and GW{current_gw:02d} is live, so those gameweeks have been played"
+    else:
+        trust = TRUST_FRESH
+        why = f"it was built for GW{horizon:02d} onwards, level with or ahead of the live GW{current_gw:02d}"
+
+    label = f"{step} · {kind}"
+    if trust == TRUST_STALE and horizon is not None and current_gw is not None:
+        label = f"{step} · {kind} for GW{horizon:02d}+ (GW{current_gw:02d} is live)"
+    note = f"a squad built from scratch, not a move from your team — no `--squad` was involved ({_seed_basis(prov)}). {why[:1].upper() + why[1:]}."
+    return {
+        "key": f"{step}_{suffix}",
+        "label": _decorate(trust, label),
+        "ids": ids,
+        "note": note,
+        "source": "log",
+        "gw": horizon,
+        "stale": trust == TRUST_STALE,
+        "trust": trust,
+        "squad_free": True,
+    }
+
+
+def _post_entry(
+    step: str,
+    ids: List[int],
+    base: Dict[str, Any],
+    prov: Dict[str, Any],
+    live_ids: List[int],
+    current_gw: Optional[int],
+    horizon: Optional[int],
+) -> Dict[str, Any]:
+    """Your team with the solve's first-gameweek moves applied.
+
+    This is the entry that used to inherit staleness in silence: apply a stale
+    solve's transfers to a stale squad and the result looks like any other
+    fifteen IDs. Three independent pieces of evidence, least trusting wins:
+
+    1. the argv, when the log has a header — the recorded `--squad` against
+       the live squad is a direct answer;
+    2. which base the derivation succeeded against — if the solve's Sells
+       could only be satisfied by the *archived* squad, then it demonstrably
+       sold players the live squad no longer holds. That settles it with no
+       header at all, which matters because every log written before today
+       has none;
+    3. the solve's own first gameweek — a move planned for a gameweek that
+       has already been played can no longer be made."""
+    seed_trust, seed_why = _seed_verdict(prov, live_ids)
+    base_trust = base.get("trust", TRUST_UNKNOWN)
+    trust = _worst(seed_trust, base_trust)
+    reasons = [seed_why]
+    reasons.append(
+        {
+            TRUST_STALE: "and its first-gameweek sells are players your live squad no longer holds, so it was solved from the archived squad",
+            TRUST_UNKNOWN: "and the squad its moves were applied to could not itself be verified",
+            TRUST_FRESH: "and its first-gameweek sells are all players you still own",
+        }[base_trust]
+    )
+    if current_gw is not None and horizon is not None and horizon < current_gw:
+        trust = _worst(trust, TRUST_STALE)
+        reasons.append(f"and it plans a GW{horizon:02d} move while GW{current_gw:02d} is already live")
+
+    label = f"{step} · after this week's move"
+    if base_trust == TRUST_STALE and base.get("gw") is not None and current_gw is not None:
+        label = f"{step} · move applied to the GW{base['gw']:02d} squad (GW{current_gw:02d} is live)"
+    return {
+        "key": f"{step}_post",
+        "label": _decorate(trust, label),
+        "ids": ids,
+        "note": "your team with the first-gameweek transfers applied — " + " ".join(reasons) + ".",
+        "source": "log",
+        "gw": horizon,
+        "stale": trust == TRUST_STALE,
+        "trust": trust,
+        "squad_free": False,
+        "base": base.get("key"),
+    }
 
 
 def discover_squads(
@@ -680,11 +1024,21 @@ def discover_squads(
     place to make a silent mistake — a wrong ID is a valid solve of the wrong
     problem. Every source here is something an earlier step already produced.
 
+    Every entry carries a `trust` of fresh / unknown / stale and is sorted by
+    it, so no trustworthy entry sits below an untrustworthy one. Nothing is
+    ever dropped: an entry that cannot be checked is offered and labelled
+    unverified, because a squad we cannot vouch for is still often the right
+    one and removing it would only send the user back to typing IDs by hand.
+
     `live` is the (optional) result of `fpl_live.live_squad()`. This function
     does no networking itself: it stays offline, pure and testable, and simply
     labels what it is handed. `live=None` means "nothing was looked up", which
     is treated identically to "the lookup failed".
     """
+    live = live or {}
+    live_ids: List[int] = [int(i) for i in (live.get("ids") or [])][:SQUAD_SIZE]
+    current_gw = live.get("current_gw")
+
     found: List[Dict[str, Any]] = _squads_for_your_team(archive_dir, live)
 
     if logs_dir and logs_dir.is_dir():
@@ -694,56 +1048,47 @@ def discover_squads(
             except OSError:
                 continue
             step = path.name.replace(".latest.log", "")
+            prov = read_log_provenance(text)
+            horizon = _solve_horizon(text)
+
+            ids = _ids_from_stage1_ids_line(text)
+            if ids:
+                found.append(_stage1_ids_entry(step, ids, prov, horizon, current_gw, live_ids))
+                continue
 
             ids = _ids_from_stage1(text)
             if len(ids) == SQUAD_SIZE:
-                found.append(
-                    {
-                        "key": f"{step}_stage1",
-                        "label": f"{step} · stage-1 squad",
-                        "ids": ids,
-                        "note": "committed decision under uncertainty",
-                        "source": "log",
-                        "stale": False,
-                    }
-                )
+                found.append(_from_scratch_entry(step, "stage1", "stage-1 squad", ids, prov, horizon, current_gw))
                 continue
 
             ids = _ids_from_first_gw_buys(text)
             if len(ids) == SQUAD_SIZE:
-                found.append(
-                    {
-                        "key": f"{step}_gw1",
-                        "label": f"{step} · EV solve squad",
-                        "ids": ids,
-                        "note": "first-gameweek squad from the stock solver",
-                        "source": "log",
-                        "stale": False,
-                    }
-                )
+                found.append(_from_scratch_entry(step, "gw1", "EV solve squad", ids, prov, horizon, current_gw))
                 continue
 
             # Apply the solve's own moves to the freshest squad we have. The
             # live squad is tried first; if the solve was run against the
             # archived one its Sells won't all be present in the live squad,
             # `_apply_first_gw_transfers` returns [], and the archived squad
-            # is tried instead.
-            for base in (b for b in (_entry_ids(found, "live"), _entry_ids(found, "current")) if b):
-                ids = _apply_first_gw_transfers(text, base)
+            # is tried instead — and *which* base succeeded is itself the
+            # evidence `_post_entry` grades the result on.
+            for base in (b for b in (_entry(found, "live"), _entry(found, "current")) if b and b.get("ids")):
+                ids = _apply_first_gw_transfers(text, base["ids"])
                 if ids:
-                    found.append(
-                        {
-                            "key": f"{step}_post",
-                            "label": f"{step} · after this week's move",
-                            "ids": ids,
-                            "note": "your team with the first-gameweek transfers applied",
-                            "source": "log",
-                            "stale": False,
-                        }
-                    )
+                    found.append(_post_entry(step, ids, base, prov, live_ids, current_gw, horizon))
                     break
+
+    # Trustworthy first. A stable sort, so inside a band the order this
+    # function already established — live squad, then archive, then logs by
+    # filename — survives untouched.
+    found.sort(key=lambda e: TRUST_RANK.get(e.get("trust", TRUST_UNKNOWN), 1))
     return found
 
 
+def _entry(found: List[Dict[str, Any]], key: str) -> Optional[Dict[str, Any]]:
+    return next((f for f in found if f["key"] == key), None)
+
+
 def _entry_ids(found: List[Dict[str, Any]], key: str) -> List[int]:
-    return next((f["ids"] for f in found if f["key"] == key), [])
+    entry = _entry(found, key)
+    return entry["ids"] if entry else []

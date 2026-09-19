@@ -55,6 +55,17 @@ import numpy as np
 import pandas as pd
 
 FIRST_SET_DEADLINE_GW = 19  # chips unused before the GW19 deadline are lost
+# The bound on a chip's gameweek is the SEASON, not the first-set deadline.
+# 26/27 has two chip sets (PROJECT.md §4.7): the first expires at the GW19
+# deadline, the second runs from GW20 to the end. This module must be able to
+# name a week in either — scoring a second-set calendar is an explicit workflow
+# (runbook §4, "wait for cup draws, then enumerate ... and score under each") —
+# so anything narrower than 1..38 would reject half the season's legal plans.
+# The lower bound is 1 rather than 0 because `combo_name` spells "chip not
+# played" as a falsy gameweek: `bb:0` would silently vanish from the plan name,
+# the manifest and the scoring, and the user would get a plan quietly missing a
+# chip rather than an error.
+FIRST_GW, LAST_GW = 1, 38
 HAUL_THRESHOLDS = (12, 15)
 CHIPS = ("wc", "bb", "fh", "tc")
 
@@ -76,6 +87,12 @@ def parse_candidate(text: str) -> dict:
     Malformed syntax used to surface as a raw ValueError traceback while an
     unknown chip name got a friendly one-liner, so the two halves of the same
     typo read as two different classes of problem.
+
+    The gameweek is range-checked against the season, FIRST_GW..LAST_GW. `bb:0`
+    was the dangerous one: it parsed, and then `combo_name` — which spells "chip
+    not played" as a falsy gameweek — dropped it, so a one-key typo produced a
+    plan silently missing a chip instead of an error. `bb:44` merely produced a
+    combination no solve can ever place.
     """
     out = {}
     for part in text.split(","):
@@ -89,8 +106,26 @@ def parse_candidate(text: str) -> dict:
             raise SystemExit(f"unknown chip '{c}' in --candidates")
         if not w.isdigit():
             raise SystemExit(f"gameweek '{w}' for chip '{c}' in --candidates is not a gameweek number — {CANDIDATE_SYNTAX}")
-        out[c] = int(w)
+        out[c] = check_gw(int(w), c, "--candidates")
     return out
+
+
+def check_gw(gw: int, chip: str, where: str) -> int:
+    """Shared by --candidates and the --bb/--fh/--wc/--tc grid.
+
+    Zero is rejected loudly rather than clamped because `combo_name` spells
+    "chip not played" as a falsy gameweek: `--bb 0` would name its plan
+    `nochip`, COLLIDING with the genuine no-chip combination on both the
+    plans/ filename and the manifest key, so one solve would silently
+    overwrite the other and a result would vanish with no error."""
+    if FIRST_GW <= gw <= LAST_GW:
+        return gw
+    why = (
+        "gameweek 0 is how an unplayed chip is spelled, so this would silently drop the chip from the plan"
+        if gw == 0
+        else f"the season has {LAST_GW} gameweeks"
+    )
+    raise SystemExit(f"gameweek {gw} for chip '{chip}' in {where} is outside {FIRST_GW}..{LAST_GW} — {why}")
 
 
 def _solve_one(task: tuple[dict, str]) -> tuple[str, dict]:
@@ -137,6 +172,12 @@ def _solve_one(task: tuple[dict, str]) -> tuple[str, dict]:
 
 def cmd_enumerate(args) -> int:
     from concurrent.futures import ProcessPoolExecutor
+
+    # Validate before any solving: each combination below is a full MILP, and
+    # `--bb 0` would name its plan `nochip` and overwrite the real no-chip run.
+    for chip in CHIPS:
+        for gw in getattr(args, chip):
+            check_gw(gw, chip, f"--{chip}")
 
     grids = {"bb": [None, *args.bb], "fh": [None, *args.fh], "wc": [None, *args.wc], "tc": [None, *args.tc]}
     combos = []

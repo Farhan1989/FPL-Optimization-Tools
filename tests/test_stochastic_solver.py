@@ -1,20 +1,26 @@
-"""Contract tests for stochastic_solver.py's input validation.
+"""Contract tests for stochastic_solver.py's refusal layer.
 
-The two-stage model itself is out of scope — it is a scenario-replicated MILP
-that takes minutes — so everything here stops at the point where a bad input
-would otherwise reach `build_and_solve` and come back as a confident wrong
-plan. Stage 1 is the move the user actually executes, which is why these
-refusals exist at all.
+A real two-stage solve on real data takes minutes, so mostly this stops at the
+point where a bad input would otherwise reach `build_and_solve` and come back
+as a confident wrong plan. Stage 1 is the move the user actually executes,
+which is why these refusals exist at all.
+
+The exception is the `solver infeasibility` section, which does solve. It has
+to: the failure it pins is HiGHS's own reporting of an infeasible MILP. Those
+models are 15 players, 2 scenarios and 2 gameweeks, and finish in about a tenth
+of a second each.
 
 The helpers duplicate tests/test_cvar_solver.py's on purpose: the two modules
 are deliberately standalone and duplicate their own helpers, so their tests do
 not share a fixture module either.
 """
+# ruff: noqa: PLR0913, PLR0917  (write_scenarios, as in tests/test_validate_sources.py)
 
 from __future__ import annotations
 
 import sys
 
+import numpy as np
 import pandas as pd
 import pytest
 
@@ -124,3 +130,154 @@ def test_main_still_requires_preseason_or_squad(tmp_path, monkeypatch):
     with pytest.raises(SystemExit) as exc:
         run_main(monkeypatch, ["--scenario-dir", str(tmp_path / "scen"), "--fts", "9"])
     assert "either --preseason or --squad is required" in str(exc.value)
+
+
+# ------------------------------------------------------------------ --force
+
+
+def test_resolve_forced_accepts_a_partial_list():
+    """--force is not a squad: any number of players, no positional quota."""
+    assert ss.resolve_forced(meta_frame(), "1,2,3") == [0, 1, 2]
+
+
+def test_resolve_forced_accepts_exactly_three_from_one_club():
+    teams = ["ARS", "ARS", "ARS"] + [f"T{i:02d}" for i in range(12)]
+    assert ss.resolve_forced(meta_frame(teams=teams), "1,2,3") == [0, 1, 2]
+
+
+def test_resolve_forced_rejects_four_from_one_club():
+    """`build_and_solve` posts `club1_<t> <= CLUB_LIMIT` alongside `sq1[p] == 1`
+    per forced row, and replicates the club cap per week per scenario, so a
+    fourth from one club is infeasible in stage 1 and in every branch."""
+    teams = ["ARS"] * 4 + [f"T{i:02d}" for i in range(11)]
+    with pytest.raises(SquadError) as exc:
+        ss.resolve_forced(meta_frame(teams=teams), "1,2,3,4")
+    assert "--force: {'ARS': 4}" in str(exc.value)
+    assert f"at most {CLUB_LIMIT} players per club" in str(exc.value)
+
+
+def test_resolve_forced_counts_only_the_players_it_was_given():
+    """The solver is free to avoid a club the --force list does not name."""
+    teams = ["ARS"] * 4 + [f"T{i:02d}" for i in range(11)]
+    assert ss.resolve_forced(meta_frame(teams=teams), "1,2,3,5") == [0, 1, 2, 4]
+
+
+# --------------------------------------------------- solver infeasibility
+#
+# The only tests in this file that SOLVE, and they have to: the failure is in
+# how HiGHS reports an infeasible MILP. It does not raise, and does not return
+# an empty solution either — `value_valid` goes False with `col_value`
+# ZERO-FILLED to the right length — so `squad1` came back [] and
+# `next(p for p in players if val(f"c1[{p}]") > 0.5)` raised a bare
+# StopIteration with an empty message, out of a dict literal.
+#
+# Infeasible on BUDGET with every club count legal, which is the point: forcing
+# four from one club is now refused up front, but a --force list that is legal
+# on clubs can still be unbuildable, so (a) does not subsume (b).
+
+
+def preseason_cfg(**over):
+    cfg = {
+        "lam": 0.0,
+        "alpha": 0.2,
+        "secs": 10,
+        "gap": 0.005,
+        "preseason": True,
+        "squad0": [],
+        "itb": 0.0,
+        "fts": 1,
+        "fixed_stage1": None,
+        "forced_in": [],
+        "max_rt": 1,
+    }
+    return cfg | over
+
+
+def toy_pts(n_scen=2, n_gw=2, seed=0):
+    return np.random.default_rng(seed).uniform(0, 8, (n_scen, 15, n_gw))
+
+
+def decay(n_gw=2):
+    return np.array([0.87**i for i in range(n_gw)])
+
+
+def test_build_and_solve_reports_infeasibility_instead_of_raising_stopiteration(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # build_and_solve writes two_stage.mps into CWD
+    meta = meta_frame(bv=7.0)  # 15 x £7.0m = £105.0m against the £100.0m cap
+    with pytest.raises(ss.SolveError) as exc:
+        ss.build_and_solve(meta, toy_pts(), np.zeros(2), decay(), preseason_cfg())
+    msg = str(exc.value)
+    assert "no feasible stage-1 plan" in msg
+    assert "Infeasible" in msg  # the status HiGHS actually gave
+    assert f"0 of {ss.SQUAD_SIZE} players" in msg
+
+
+def test_solve_error_is_not_a_squad_error():
+    """SquadError means the ID list was never legal. SolveError is the model's
+    verdict on a list that passed every check; stage 1 is the move actually
+    executed, so the two must not be caught interchangeably."""
+    assert not issubclass(ss.SolveError, SquadError)
+    assert issubclass(ss.SolveError, RuntimeError)
+
+
+def test_build_and_solve_points_at_force_when_a_force_list_was_supplied(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ss.SolveError) as exc:
+        ss.build_and_solve(meta_frame(bv=7.0), toy_pts(), np.zeros(2), decay(), preseason_cfg(forced_in=[0]))
+    assert "--force list" in str(exc.value)
+
+
+def test_build_and_solve_does_not_blame_force_when_none_was_given(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(ss.SolveError) as exc:
+        ss.build_and_solve(meta_frame(bv=7.0), toy_pts(), np.zeros(2), decay(), preseason_cfg())
+    assert "--force" not in str(exc.value)
+
+
+# ------------------------------------------------------------ main, solving
+
+
+def write_scenarios(path, n_scen=4, gws=(5, 6), teams=None, bv=5.0, seed=0):
+    path.mkdir(parents=True, exist_ok=True)
+    meta = meta_frame(teams=teams, bv=bv)
+    rng = np.random.default_rng(seed)
+    for s in range(n_scen):
+        df = meta.copy()
+        for g in gws:
+            df[f"{g}_Pts"] = rng.uniform(0, 8, len(df)).round(2)
+        df.to_csv(path / f"scenario_{s:03d}.csv", index=False)
+    return path
+
+
+def solve_args(tmp_path, **kw):
+    scen = write_scenarios(tmp_path / "scen", **kw)
+    return ["--scenario-dir", str(scen), "--preseason", "--weeks", "2", "--use-scenarios", "2", "--secs", "10"]
+
+
+def test_main_refuses_a_force_list_breaking_the_club_limit(tmp_path, monkeypatch, capsys):
+    """Refused before the model is built — the point of checking it up front."""
+    teams = ["ARS"] * 4 + [f"T{i:02d}" for i in range(11)]
+    code = run_main(monkeypatch, [*solve_args(tmp_path, teams=teams), "--force", "1,2,3,4"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "--force: {'ARS': 4}" in err
+    assert "NOT solving" in err
+
+
+def test_main_reports_an_infeasible_solve_and_exits_one(tmp_path, monkeypatch, capsys):
+    """End to end: this used to end in a bare StopIteration traceback."""
+    args = solve_args(tmp_path, bv=7.0)  # 15 x £7.0m = £105.0m
+    monkeypatch.chdir(tmp_path)
+    assert run_main(monkeypatch, args) == 1
+    err = capsys.readouterr().err
+    assert "no feasible stage-1 plan" in err
+    assert "NO PLAN REPORTED" in err
+
+
+def test_main_still_solves_a_feasible_model(tmp_path, monkeypatch, capsys):
+    """The companion: a buildable pool must still come back with a stage-1
+    squad, so the new guard cannot be passing by refusing everything."""
+    args = solve_args(tmp_path, bv=5.0)  # 15 x £5.0m = £75.0m
+    monkeypatch.chdir(tmp_path)
+    assert run_main(monkeypatch, args) == 0
+    assert "Stage-1 squad (the committed decision)" in capsys.readouterr().out

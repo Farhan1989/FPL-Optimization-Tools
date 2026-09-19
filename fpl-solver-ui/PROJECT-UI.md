@@ -106,12 +106,29 @@ same: check the artifact, not the description.
   `archive_solve.py` remains what preserves a week. Run logs under `.runs/` do
   now carry a `#` provenance header (command, ids, timestamps, exit status), so
   a finished run can at least be identified after the server stops.
-- **Derived squad entries inherit staleness silently.** *Fill from…* labels the
-  archived squad `STALE` and offers the live one above it (`fpl_live.py`), but
-  `<step> · after this week's move` applies a log's transfers to a base squad —
-  if that solve was itself seeded with a stale squad, the derived entry is stale
-  and unmarked. Fixable now that each log records its `--squad` argv: compare
-  the seed against the live squad. Not done.
+- **Squad-fill trust is three-valued, and the third value is load-bearing.**
+  Every *Fill from…* entry now carries `trust` of `fresh` / `unknown` / `stale`,
+  shown in the label (`note` is only a hover tooltip) and sorted on, so a
+  trustworthy entry never sits below an untrustworthy one. `unknown` means
+  *we could not check*, not *fine*: a log with no `#` provenance header, a
+  recorded command with no `--squad`, or a live API that did not answer. The
+  evidence for a derived entry is the recorded `--squad` compared against the
+  live squad; failing that, which base squad its first-gameweek Sells could
+  actually be applied to, which proves staleness with no header at all.
+  Nothing is ever dropped — an unverifiable entry is still usually the right
+  one, and removing it just sends you back to typing fifteen IDs.
+- **Preseason entries are squad-free, not stale-seeded — but they do expire.**
+  A `stage-1 squad` or `EV solve squad` entry comes from a solve that was
+  handed no team at all (`--preseason`), so there is no seed to be stale. What
+  dates it is its own horizon: a 15 built for GW1–4 is a historical answer
+  once GW5 is live, and it is labelled with the gameweeks it was built for
+  rather than as a stale seed. During an actual preseason or wildcard the same
+  entry grades `fresh`.
+- **Still unverifiable by design:** a run whose squad is fetched by the script
+  rather than passed on the command line (`archive_solve.py` reads picks from
+  the API itself). Its `--squad` will never appear in a header, so such an
+  entry can only ever reach `fresh` through the Sells-against-live check being
+  extended to prove equality, which it cannot do today.
 - **Python 3.14 concern (unresolved).** `highspy` and `sasoptpy` may lack wheels
   for 3.14; if the repo environment is on it, that is worth checking
   independently of this UI.

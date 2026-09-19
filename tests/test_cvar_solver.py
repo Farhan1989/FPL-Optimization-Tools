@@ -1,10 +1,14 @@
-"""Contract tests for cvar_solver.py's input validation.
+"""Contract tests for cvar_solver.py's refusal layer.
 
-Scope is the refusal layer, not the MILP: `solve_cvar` imports sasoptpy and
-HiGHS and takes minutes, so nothing here solves. What is covered is everything
-between an ID list arriving on the command line and a number being printed for
-it — the path PROJECT.md §8 Phase 6 records as having once scored a 13-man
-squad in silence.
+Mostly the path between an ID list arriving on the command line and a number
+being printed for it — what PROJECT.md §8 Phase 6 records as having once scored
+a 13-man squad in silence. A real solve on real data takes minutes, so none of
+that is exercised here.
+
+The one exception is the `solver infeasibility` section at the end, which does
+solve. It has to: the failure it pins is HiGHS's own reporting of an infeasible
+MILP, which no input-validation stand-in can reproduce. Those models are 15
+players over 2 gameweeks and finish in about a tenth of a second each.
 
 Everything is synthetic and lives in tmp_path; nothing reads scenarios/.
 """
@@ -178,3 +182,118 @@ def test_main_does_not_warn_at_exactly_the_budget(tmp_path, monkeypatch, capsys)
     bv = [6.7] * 14 + [6.2]  # 100.0 exactly, in prices that do not sum cleanly
     assert run_main(monkeypatch, [*base_args(tmp_path, bv=bv), "--evaluate", spec()]) == 0
     assert "budget" not in capsys.readouterr().err
+
+
+# ------------------------------------------------------------------ --force
+
+
+def test_resolve_forced_accepts_a_partial_list():
+    """--force is not a squad: any number of players, no positional quota."""
+    assert cs.resolve_forced(meta_frame(), "1,2,3") == [0, 1, 2]
+
+
+def test_resolve_forced_accepts_exactly_three_from_one_club():
+    teams = ["ARS", "ARS", "ARS"] + [f"T{i:02d}" for i in range(12)]
+    assert cs.resolve_forced(meta_frame(teams=teams), "1,2,3") == [0, 1, 2]
+
+
+def test_resolve_forced_rejects_four_from_one_club():
+    """`solve_cvar` posts `club_<t> <= CLUB_LIMIT` and `x[p] == 1` per forced
+    row, so a fourth from one club is infeasible by construction — no choice of
+    the other eleven rescues it. Naming the club beats spending --secs to be
+    told nothing."""
+    teams = ["ARS"] * 4 + [f"T{i:02d}" for i in range(11)]
+    with pytest.raises(SquadError) as exc:
+        cs.resolve_forced(meta_frame(teams=teams), "1,2,3,4")
+    assert "--force: {'ARS': 4}" in str(exc.value)
+    assert f"at most {CLUB_LIMIT} players per club" in str(exc.value)
+
+
+def test_resolve_forced_counts_only_the_players_it_was_given():
+    """The solver is free to avoid a club the --force list does not name."""
+    teams = ["ARS"] * 4 + [f"T{i:02d}" for i in range(11)]
+    assert cs.resolve_forced(meta_frame(teams=teams), "1,2,3,5") == [0, 1, 2, 4]
+
+
+def test_main_refuses_a_force_list_breaking_the_club_limit(tmp_path, monkeypatch, capsys):
+    teams = ["ARS"] * 4 + [f"T{i:02d}" for i in range(11)]
+    code = run_main(monkeypatch, [*base_args(tmp_path, teams=teams), "--force", "1,2,3,4"])
+    err = capsys.readouterr().err
+    assert code == 1
+    assert "--force: {'ARS': 4}" in err
+    assert "NOT solving" in err
+
+
+# --------------------------------------------------- solver infeasibility
+#
+# The only tests in this file that actually SOLVE, and they have to: the bug is
+# in how HiGHS reports an infeasible MILP, which no amount of input validation
+# stands in for. HiGHS does not raise, and does not hand back an empty solution
+# either — `value_valid` goes False with `col_value` ZERO-FILLED to the right
+# length — so `squad` came back [] and the captain dict comprehension's
+# `next(p for p in players if ...)` raised a bare StopIteration with an empty
+# message. These models are 15 players over 2 gameweeks and solve in ~0.1s.
+#
+# Infeasible on BUDGET, with every club count legal: forcing four from one club
+# is now refused up front, but a legal --force list can still be unbuildable, so
+# the club check does not subsume this.
+
+
+def infeasible_meta():
+    """15 players at £7.0m = £105.0m against the £100.0m cap."""
+    return meta_frame(bv=7.0)
+
+
+def toy_pts(n_scen=4, n_gw=2, seed=0):
+    return np.random.default_rng(seed).uniform(0, 8, (n_scen, 15, n_gw))
+
+
+def test_solve_cvar_reports_infeasibility_instead_of_raising_stopiteration(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)  # solve_cvar writes cvar_model.mps into CWD
+    with pytest.raises(cs.SolveError) as exc:
+        cs.solve_cvar(infeasible_meta(), [5, 6], toy_pts(), np.zeros(4), 0.5, 0.2, 0.87, 10)
+    msg = str(exc.value)
+    assert "no feasible squad" in msg
+    assert "Infeasible" in msg  # the status HiGHS actually gave
+    assert f"0 of {cs.SQUAD_SIZE} players" in msg
+
+
+def test_solve_error_is_not_a_squad_error():
+    """SquadError means the ID list was never legal. SolveError is the model's
+    own verdict on a list that passed every check, so the two must not be
+    caught interchangeably."""
+    assert not issubclass(cs.SolveError, SquadError)
+    assert issubclass(cs.SolveError, RuntimeError)
+
+
+def test_solve_cvar_points_at_force_when_a_force_list_was_supplied(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(cs.SolveError) as exc:
+        cs.solve_cvar(infeasible_meta(), [5, 6], toy_pts(), np.zeros(4), 0.5, 0.2, 0.87, 10, forced=[0])
+    assert "--force list" in str(exc.value)
+
+
+def test_solve_cvar_does_not_blame_force_when_none_was_given(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    with pytest.raises(cs.SolveError) as exc:
+        cs.solve_cvar(infeasible_meta(), [5, 6], toy_pts(), np.zeros(4), 0.5, 0.2, 0.87, 10)
+    assert "--force" not in str(exc.value)
+
+
+def test_main_reports_an_infeasible_solve_and_exits_one(tmp_path, monkeypatch, capsys):
+    """End to end: this used to end in a bare StopIteration traceback."""
+    args = base_args(tmp_path, bv=7.0)  # 15 x £7.0m = £105.0m
+    monkeypatch.chdir(tmp_path)
+    assert run_main(monkeypatch, args) == 1
+    err = capsys.readouterr().err
+    assert "no feasible squad" in err
+    assert "NO SQUAD REPORTED" in err
+
+
+def test_main_still_solves_a_feasible_model(tmp_path, monkeypatch, capsys):
+    """The companion to the above: a buildable pool must still come back with a
+    squad, so the new guard cannot be passing by refusing everything."""
+    args = base_args(tmp_path, bv=5.0)  # 15 x £5.0m = £75.0m
+    monkeypatch.chdir(tmp_path)
+    assert run_main(monkeypatch, args) == 0
+    assert "squad EO-weight sum" in capsys.readouterr().out

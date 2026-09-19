@@ -390,6 +390,16 @@ gameweek needs a multi-GW source — see §7. Calibration verified only that sam
 the blended projection (bias −0.02); the *shape* of the tails is unverified
 until realised outcomes exist.
 
+**Enrichment is EV-conserving except where the assist floor binds.** The delta
+is repaid through `lam_assist`, floored at zero. Where the owed *reduction*
+exceeds a player's assist rate — goalkeepers above all, whose attacking share
+is 0.02 — the repayment is clipped and EV is created. On the real GW5-16 blend
+this bound for **62 of 274 players and manufactured +15.6 points**, up to +0.99
+on one goalkeeper (+26% of his projection). It biases toward defenders and
+keepers on teams whose published clean sheet beats the inferred one, which is
+precisely the §4.4 double-counting the design is meant to prevent. Covered by a
+test; unfixed pending a decision on where the remainder should go.
+
 **`cvar_solver.py`** — field model is static ownership from one snapshot;
 real EO drifts. Captaincy model (share ∝ own×proj among top 12) is an
 approximation. No transfers, no chips: it is a squad/lineup/captain tool for
@@ -635,6 +645,29 @@ Notable fixes during review and use:
   `asyncio.wait_for` ceiling, because a drip-feeding server defeats the former.
   Also fixed: `sorted(glob("picks_gw*.json"))[-1]` sorted lexicographically, so
   `picks_gw9` would have beaten `picks_gw10` from October.
+- **EV conservation has a hole, and it leans the wrong way.** `apply_enrichment`
+  repays the clean-sheet/DefCon delta through `lam_assist += delta / (3*p_play)`
+  under a `np.maximum(..., 0.0)` floor. When enrichment *adds* clean-sheet
+  expectation the delta is negative, and a goalkeeper's assist rate is a rounding
+  error (`SHARE["GKP"]["attack"] = 0.02`), so the floor clips the repayment and
+  the player keeps EV he was never projected. Measured on the real GW5-16 blend
+  against the real feed: the floor binds for **62 of 274 players projected above
+  a point, manufacturing +15.6 EV points**, worst case Raya **+0.99 on a 3.86
+  projection (+26%)** — DEF +11.13 over 46 players, GKP +3.73 over 12.
+  This matters beyond the arithmetic: it converts a *variance* effect into an
+  *expectation* effect for exactly the players a good published clean sheet
+  favours, which is the §4.4 double-counting trap the enrichment design exists
+  to avoid. Pinned by `test_bug_assist_floor_creates_ev_...`. **Not fixed** —
+  the remainder has to go somewhere (spread across goals/bonus/saves, or scale
+  the override down to what a player can absorb), and that is a modelling
+  decision, not a mechanical one.
+- **B4's output can be filled from.** `stochastic_solver.py` prints
+  `[2stage] stage-1 squad IDs: ...` for both arms. The transfers line names
+  PLAYERS, and names are ambiguous here — "Palmer" resolves to two FPL ids this
+  season — so the UI could not offer the transfer decision as a squad fill at
+  all, leaving an August preseason squad as the freshest option. The reader
+  grades it: seeded-with-live is fresh, seeded-with-superseded is stale, a
+  headerless log is *unknown* rather than fresh.
 - **`decompose()` fragmentation.** Derived columns are built in one
   `pd.concat(axis=1)` instead of ~10 single-column inserts per gameweek.
   Warnings 10 → 0 (42 → 0 uncapped), output 42 lines → 22. Verified
