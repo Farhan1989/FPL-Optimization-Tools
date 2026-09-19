@@ -168,6 +168,17 @@ def build_pool(meta, pts, w_own):
 # ------------------------------------------------------------------- solving
 
 
+class SolveError(RuntimeError):
+    """The MILP came back without a usable squad — infeasible, or no incumbent.
+
+    Distinct from SquadError, which is about an ID list that was never legal.
+    This is the model's own verdict on constraints that were each individually
+    fine: a --force list inside the club limit can still be unbuildable on
+    budget or on the 2/5/5/3 quota, and a time limit can expire before any
+    incumbent is found. Both used to surface as a bare StopIteration.
+    """
+
+
 def solve_cvar(meta, gws, pts, F, lam, alpha, decay, secs, forced=None):
     """`forced` is a list of ROW indices into `meta` (i.e. pool positions), already validated.
 
@@ -250,8 +261,31 @@ def solve_cvar(meta, gws, pts, F, lam, alpha, decay, secs, forced=None):
     vals = np.array(sol.col_value)
     names = [h.getColName(i)[1] for i in range(h.getNumCol())]
     idx = {nm: i for i, nm in enumerate(names)}
-    squad = [p for p in players if vals[idx[f"squad[{p}]"]] > 0.5]
-    caps = {w: next(p for p in players if vals[idx[f"captain[{p},{w}]"]] > 0.5) for w in weeks}
+
+    # HiGHS does NOT raise on an infeasible MILP, and does not return an empty
+    # solution either: it hands back `value_valid=False` with `col_value`
+    # ZERO-FILLED to the right length. Every `> 0.5` test below then fails, so
+    # `squad` came back as [] and the captain comprehension — `next(p for p in
+    # players if ...)` with no default — raised a bare StopIteration from inside
+    # a dict comprehension. Four forced players from one club reported itself as
+    # a traceback with no mention of clubs, forcing, or infeasibility.
+    status = h.modelStatusToString(h.getModelStatus())
+    squad = [p for p in players if vals[idx[f"squad[{p}]"]] > 0.5] if sol.value_valid else []
+    if not sol.value_valid or len(squad) != SQUAD_SIZE:
+        hint = (
+            "a --force list can pass every up-front check and still be unbuildable: too many forced "
+            "players, an impossible positional mix, or more than the budget allows"
+            if forced
+            else "check --weeks against the scenario set, and raise --secs if the status is a limit rather than infeasibility"
+        )
+        raise SolveError(f"no feasible squad (HiGHS status: {status}); the solve returned {len(squad)} of {SQUAD_SIZE} players — {hint}")
+
+    caps = {}
+    for w in weeks:
+        picked = next((p for p in players if vals[idx[f"captain[{p},{w}]"]] > 0.5), None)
+        if picked is None:
+            raise SolveError(f"no captain in week {w} of the returned solution (HiGHS status: {status}) — the solve is not usable")
+        caps[w] = picked
     lineup = {w: [p for p in players if vals[idx[f"lineup[{p},{w}]"]] > 0.5] for w in weeks}
     return squad, lineup, caps, float(info.mip_gap)
 
@@ -319,8 +353,23 @@ def resolve_forced(meta: pd.DataFrame, spec: str, label: str = "--force") -> lis
     path dropped one that did not, and `solve_cvar` then skipped the constraint
     behind an `if len(hits)` guard, so the user got a solve that had quietly
     ignored the player they asked to force in.
+
+    The club limit DOES apply, though, and it is the one squad rule a --force
+    list breaks entirely on its own. `solve_cvar` posts `club_<t> <= CLUB_LIMIT`
+    for every club and `x[p] == 1` for every forced row, so a fourth forced
+    player from one club makes the model infeasible BY CONSTRUCTION — no choice
+    of the other eleven can rescue it. Naming the club up front costs nothing;
+    the alternative is spending the full --secs to be told nothing at all.
+
+    No other legality rule is re-derived here. --force has no size and no
+    positional quota of its own, so the remaining ways a list can turn out
+    unbuildable (too many players, an impossible positional mix, more forced
+    spend than the budget allows, or any combination) are the model's verdict
+    to give, and SolveError now gives it properly instead of crashing.
     """
-    return resolve_ids(meta, spec, label)
+    rows = resolve_ids(meta, spec, label)
+    check_club_limit(meta, rows, label)
+    return rows
 
 
 def resolve_squad(meta: pd.DataFrame, spec: str, label: str) -> list[int]:
@@ -527,7 +576,11 @@ def main() -> int:
     squads = {}
     for lam in lams:
         print(f"\n[cvar] solving lam={lam} alpha={args.alpha} ...")
-        squad, lineup, caps, gap = solve_cvar(meta_p, gws, pts_p, F, lam, args.alpha, args.decay, args.secs, forced)
+        try:
+            squad, lineup, caps, gap = solve_cvar(meta_p, gws, pts_p, F, lam, args.alpha, args.decay, args.secs, forced)
+        except SolveError as exc:
+            print(f"[cvar] {exc} — NO SQUAD REPORTED", file=sys.stderr)
+            return 1
         delta = portfolio_delta(pts_p, d, F, lineup, caps)
         tag = f"lam={lam}"
         results[tag] = describe(tag, delta, args.alpha)
