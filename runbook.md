@@ -62,9 +62,9 @@ which warns if you break an invariant:
 | `datasource` | `"mixed"` | blend both sources |
 | `data_weights` | `{"review": 1, "solio": 1}` | §4.1 |
 | `gap` | `0` | §4.3 — without it, plan ordering is not real |
-| `horizon` | `12` | §4.6 |
+| `horizon` | `14` | §4.6 — was 12 until 14 Aug 2026 |
 | `decay_base` | `0.87` | §5 |
-| `num_iterations` | `3` | gives the Compare panel something to compare |
+| `num_iterations` | `2`+ | gives the Compare panel something to compare |
 | `secs` | `900`+ | per-solve time limit |
 
 ---
@@ -113,7 +113,7 @@ defaulted from your settings) and *Seed* (42). It clears `scenarios/` first.
 uv run python solio_enrich.py --out data/enrich.json
 rm -rf scenarios/
 uv run python scenario_generator.py --sources review solio --data-dir data \
-    --scenarios 200 --out scenarios/ --horizon 12 --seed 42 \
+    --scenarios 200 --out scenarios/ --horizon 14 --seed 42 \
     --enrich data/enrich.json
 ```
 
@@ -135,6 +135,14 @@ uv run python scenario_generator.py ... --enrich data/enrich.json --enrich-stric
 A `GW<n> is LOCKED` warning means the horizon starts in a gameweek whose
 deadline has passed, so nothing it recommends can be executed. Refresh the
 sources so the horizon starts at the next actionable gameweek.
+
+**Keep `--horizon` equal to your `user_settings.json` horizon.** The UI passes
+the setting through; these CLI examples hardcode it, so an edited setting and a
+copy-pasted command silently produce scenario sets of different lengths that
+are not comparable. `load_blend` intersects the sources, so the effective
+horizon is also capped by the *shorter* export — if one source is short, you
+get fewer gameweeks than you asked for and only the printed `GWs a-b` line
+says so.
 
 The `rm -rf` matters on the CLI. Regenerating with a *smaller* `--scenarios`
 leaves higher-numbered files from the previous run in place, and every
@@ -243,7 +251,7 @@ The only real test is a scenario set it has never seen.
 **CLI:**
 ```bash
 uv run python scenario_generator.py --sources review solio --data-dir data \
-    --scenarios 200 --out scenarios_v/ --horizon 12 --seed 99 \
+    --scenarios 200 --out scenarios_v/ --horizon 14 --seed 99 \
     --enrich data/enrich.json
 
 uv run python cvar_solver.py --scenario-dir scenarios_v/ \

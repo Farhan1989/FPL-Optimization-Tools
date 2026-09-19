@@ -300,10 +300,18 @@ error — it would quietly become a two-source blend.
 Keep the subscription for written analysis if valued. Do not feed it to the
 solver at any weight.
 
-### 4.6 Horizon 12 — KEEP (Solio offers 19)
+### 4.6 Horizon 14 — KEEP (Solio offers 19)
 
-At `decay_base` 0.87, GW19 carries ~8% weight. Extending costs solve time
-for negligible gain and breaks alignment with Review's 14.
+Originally 12, on the reasoning that at `decay_base` 0.87 GW19 carries ~8%
+weight so extending costs solve time for negligible gain. It moved to **14 on
+14 Aug 2026** to align with Review's own 14-gameweek export, and has run there
+ever since. The change was not recorded at the time — see §5.
+
+Both exports carried GW5-18 as of 18 Sep 2026, so 14 is fully two-source.
+That is not guaranteed week to week: `load_blend` intersects the sources, so a
+short export silently shortens the horizon and only the printed `GWs a-b` line
+reveals it. `read_mixed` (the stock solver's path) renormalises per gameweek
+instead, so the two routes can disagree about how many weeks they modelled.
 
 **Verified safe:** gameweeks present in only one source are **not halved** —
 the blend normalises by available weight (`weight` column drops to 0.5 but
@@ -357,6 +365,61 @@ missing dataset exist going forward.
 
 ---
 
+### 4.9 EV conservation under enrichment — FIX WITH CASCADE-THEN-SCALE (option C)
+
+**Decided Sep 2026. Not yet implemented — see §7.**
+
+`apply_enrichment` repays the clean-sheet/DefCon delta through one channel:
+
+```python
+lam_assist = np.maximum(lam_assist + delta_ev / (ASSIST_PTS * p_play), 0.0)
+```
+
+Freed EV (published CS *worse* than inferred) always fits — assists rise.
+**Owed** EV must come out of assists, and for some players there is not enough
+assist to take it from: `SHARE["GKP"]["attack"]` is 0.02. The floor clips the
+repayment and the player keeps EV he was never projected.
+
+Measured on the real GW5-16 blend against the real feed: the floor binds for
+**62 of 274 players projected above a point, manufacturing +15.61 points**;
+worst case Raya **+0.99 on a 3.86 projection (+26%)**. DEF +11.13 over 46
+players, GKP +3.73 over 12.
+
+The arithmetic is not the worst part. It converts a **variance** effect into an
+**expectation** effect for exactly the defenders and keepers whose published
+clean sheet beats the inferred one — a smaller version of the §4.4
+double-counting that the EV-conserving design exists to prevent.
+
+**Options considered, with measured headroom:**
+
+| | Approach | Residual left unconserved |
+|---|---|---|
+| A | cascade into saves, bonus, then goals | **+1.57** (13 players still short) |
+| B | scale each override down to what the player can absorb | 0, but discards published CS for the players it matters most to |
+| **C** | **A, then B for whoever A cannot cover** | **0, partial override on 13 players not 62** |
+| D | accept and document | +15.61 |
+
+**C is the decision.** It is the only option that conserves EV *and* keeps the
+published data intact for all but the 13 players who genuinely cannot absorb
+the remainder. A alone leaves a smaller copy of the same bug; B throws away the
+signal `solio_enrich.py` exists to fetch. Tightest case is Danso (DEF SUN),
+needing 0.94 against 0.41 of headroom — a ratio of 2.28, so partial override
+is unavoidable for that tail whatever else is done.
+
+**Why it has not shipped yet.** It changes the decomposition maths, so every
+archived scenario set becomes non-comparable with sets generated afterwards —
+a §5-class change requiring a recorded decision, which is this entry. The
+effect is ~15 points spread across 554 players in the first horizon gameweek
+only, so it does not move a weekly transfer call. When it lands, record the
+changeover in §5 the way the horizon change below should have been.
+
+The invariant tests in `tests/test_scenario_generator.py` already pin both the
+conserving cases and the floor bug (`test_bug_assist_floor_creates_ev_...`),
+so the fix can be verified rather than asserted. That test must be rewritten to
+assert conservation when C lands.
+
+---
+
 ## 5. Invariants — do not change mid-season
 
 Changing any of these silently makes the archive non-comparable, which
@@ -367,11 +430,19 @@ defeats its purpose.
 | elevenify dial | *(record in `--note`)* | Redefines `review.csv` |
 | `data_weights` | `{review: 1, solio: 1}` | See §4.1 |
 | `decay_base` | 0.87 | |
-| `horizon` | 12 | |
+| `horizon` | **14** | Was 12; changed 14 Aug 2026 — see below |
 | `gap` | 0 | See §4.3 |
 | scenario `--seed` | fixed per run, logged | Reproducibility |
 
 If one must change, record it in `--note` **and** add a line to §7 below.
+
+**This rule has been broken once, silently.** `horizon` went from 12 to 14
+between the archived snapshots `20260804T124510Z` and `20260814T213213Z`, and
+nothing recorded it — the docs still said 12 for a month while every solve ran
+at 14. Consequence: the four earliest GW1 snapshots are **not** comparable with
+the eight that follow, and any cross-snapshot claim spanning 14 Aug 2026 needs
+that caveat. Recorded here rather than quietly corrected, because a silent fix
+is the same failure again.
 
 ---
 
@@ -398,7 +469,10 @@ this bound for **62 of 274 players and manufactured +15.6 points**, up to +0.99
 on one goalkeeper (+26% of his projection). It biases toward defenders and
 keepers on teams whose published clean sheet beats the inferred one, which is
 precisely the §4.4 double-counting the design is meant to prevent. Covered by a
-test; unfixed pending a decision on where the remainder should go.
+test. **The decision is made — §4.9, option C (cascade then scale) — and is
+waiting on implementation, not on judgement.** Until it ships, treat defender
+and goalkeeper EV on teams with a better-than-inferred published clean sheet as
+slightly optimistic in the first horizon gameweek.
 
 **`cvar_solver.py`** — field model is static ownership from one snapshot;
 real EO drifts. Captaincy model (share ∝ own×proj among top 12) is an
@@ -459,6 +533,14 @@ stock solver and `chip_planner.py`.
    are also suspect for a second reason — see the `--evaluate` validation bug
    in §8 Phase 6: any run whose ID list contained a typo scored a partial
    squad and reported a confident number for it.
+2. **Implement §4.9 (option C): cascade-then-scale EV conservation.** Decided,
+   not built. Spill the unrepayable remainder into saves, then bonus, then
+   goals; for the ~13 players even that cannot cover, scale their CS/DefCon
+   override down to what they can absorb. Rewrite
+   `test_bug_assist_floor_creates_ev_...` to assert conservation instead of
+   documenting its absence, and verify the other invariant tests still hold.
+   Record the changeover in §5 — scenario sets generated before and after are
+   not comparable. Do it between gameweeks, never mid-week.
 2. **Calibrate scenario priors** (~GW6). Compare sampled P(blank), P(haul),
    DefCon hit rates and clean-sheet frequency by position against realised
    outcomes from the archive. Adjust `SHARE` in `scenario_generator.py`.
